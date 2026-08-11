@@ -16,7 +16,12 @@ const geminiBadModels = new Set();
 
 /* ---------- Gemini TTS: voces neuronales sin servidor ---------- */
 
-const GEMINI_TTS_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
+// Cada modelo tiene su propia cuota gratuita: usarlos por turnos multiplica el margen.
+const GEMINI_TTS_MODELS = [
+  "gemini-3.1-flash-tts-preview",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-2.5-pro-preview-tts",
+];
 const geminiBadTtsModels = new Set();
 
 // Multilingües: la misma voz lee español e inglés según el texto.
@@ -79,12 +84,34 @@ function estimateWords(text, durationMs) {
   });
 }
 
-async function geminiSpeak(text, voiceName) {
-  const apiKey = (state.settings.gemini_api_key || "").trim();
-  if (!apiKey) {
-    throw new Error("Configura tu API key de Google AI Studio en Ajustes para usar las voces Gemini.");
+/* Google limita las peticiones por minuto y por modelo. Para que la lectura no
+   se corte: las peticiones van de una en una y espaciadas, se reparten entre
+   los modelos disponibles, y ante un límite se espera lo que Google indica y
+   se reintenta con otro modelo. El espaciado se adapta solo. */
+const ttsGate = { chain: Promise.resolve(), last: 0, gapMs: 1200, cooldownUntil: {} };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function nextTtsModel() {
+  const now = Date.now();
+  const usable = GEMINI_TTS_MODELS.filter(
+    (m) => !geminiBadTtsModels.has(m) && (ttsGate.cooldownUntil[m] || 0) <= now);
+  if (usable.length) return usable[0];
+  // todos en espera: se elige el que se libera antes
+  const waiting = GEMINI_TTS_MODELS.filter((m) => !geminiBadTtsModels.has(m));
+  if (!waiting.length) return null;
+  return waiting.sort((a, b) => (ttsGate.cooldownUntil[a] || 0) - (ttsGate.cooldownUntil[b] || 0))[0];
+}
+
+function parseRetryDelay(error) {
+  for (const d of error?.details || []) {
+    const secs = Number(/(\d+)/.exec(d.retryDelay || "")?.[1]);
+    if (secs) return secs * 1000;
   }
-  const models = GEMINI_TTS_MODELS.filter((m) => !geminiBadTtsModels.has(m));
+  return 20000;
+}
+
+async function requestTts(text, voiceName, apiKey) {
   const payload = {
     contents: [{ parts: [{ text: `Lee en voz alta el siguiente texto, con tono natural y sin añadir nada:\n\n${text}` }] }],
     generationConfig: {
@@ -92,9 +119,21 @@ async function geminiSpeak(text, voiceName) {
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
     },
   };
-  let lastError = "sin modelos de voz disponibles";
 
-  for (const model of models.length ? models : GEMINI_TTS_MODELS) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const model = nextTtsModel();
+    if (!model) break;
+
+    // Esperar más de esto no compensa: es mejor seguir con la voz del dispositivo.
+    if ((ttsGate.cooldownUntil[model] || 0) - Date.now() > 25000) break;
+
+    const wait = Math.max(
+      (ttsGate.cooldownUntil[model] || 0) - Date.now(),
+      ttsGate.last + ttsGate.gapMs - Date.now(),
+    );
+    if (wait > 0) await sleep(wait);
+    ttsGate.last = Date.now();
+
     let res;
     try {
       res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -105,26 +144,47 @@ async function geminiSpeak(text, voiceName) {
     } catch {
       throw new Error("Sin conexión con Google (¿hay internet?)");
     }
+
     if (res.ok) {
       const part = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
       if (!part?.data) throw new Error("Gemini no devolvió audio");
       const pcm = Uint8Array.from(atob(part.data), (c) => c.charCodeAt(0));
       const rate = Number(/rate=(\d+)/.exec(part.mimeType || "")?.[1]) || 24000;
+      ttsGate.gapMs = Math.max(1200, ttsGate.gapMs * 0.8);      // se relaja al ir bien
       return { blob: pcmToWav(pcm, rate), durationMs: (pcm.length / 2 / rate) * 1000 };
     }
-    let message = "";
-    try { message = (await res.json())?.error?.message || ""; } catch {}
-    lastError = message || `HTTP ${res.status}`;
+
+    let error = {};
+    try { error = (await res.json())?.error || {}; } catch {}
+    const message = error.message || `HTTP ${res.status}`;
+
     if (res.status === 429) {
-      throw new Error("Alcanzaste el límite de uso gratuito de Google por ahora. Espera un momento o cambia a una voz del dispositivo.");
+      // El límite diario no se recupera esperando: ese modelo se descarta por hoy.
+      const perDay = JSON.stringify(error.details || []).includes("PerDay");
+      ttsGate.cooldownUntil[model] = Date.now() + (perDay ? 6 * 3600e3 : parseRetryDelay(error));
+      if (!perDay) ttsGate.gapMs = Math.min(8000, ttsGate.gapMs * 1.6);
+      continue;                                                  // se prueba con otro modelo
     }
     if (UNAVAILABLE_HINTS.some((h) => message.toLowerCase().includes(h))) {
       geminiBadTtsModels.add(model);
       continue;
     }
-    throw new Error(`Voces Gemini: ${lastError}`);
+    throw new Error(`Voces Gemini: ${message}`);
   }
-  throw new Error(`Voces Gemini: ${lastError}`);
+  const err = new Error("Google agotó el uso gratuito por ahora.");
+  err.quota = true;
+  throw err;
+}
+
+function geminiSpeak(text, voiceName) {
+  const apiKey = (state.settings.gemini_api_key || "").trim();
+  if (!apiKey) {
+    return Promise.reject(new Error("Configura tu API key de Google AI Studio en Ajustes para usar las voces Gemini."));
+  }
+  // una petición a la vez: evita ráfagas que disparan el límite por minuto
+  const run = ttsGate.chain.then(() => requestTts(text, voiceName, apiKey));
+  ttsGate.chain = run.catch(() => {});
+  return run;
 }
 
 /* ---------- device voices (Web Speech API — no external service needed) ---------- */
@@ -167,20 +227,18 @@ function bestDeviceVoice(lang) {
 
 /* Si la voz guardada no puede sonar en este dispositivo, se elige la mejor
    disponible: Gemini cuando hay clave, si no la del propio dispositivo. */
+/* Por defecto se usa la voz del dispositivo: es ilimitada. Las voces Gemini
+   tienen una cuota diaria muy pequeña, así que solo se usan si las eliges. */
 function autoPickDeviceVoices() {
   const hasKey = Boolean((state.settings.gemini_api_key || "").trim());
   const patch = {};
   for (const [lang, field] of [["es", "voice_es"], ["en", "voice_en"]]) {
     const current = state.settings[field];
-    if (isDeviceVoice(current)) continue;                  // siempre disponible
-    if (isGeminiVoice(current) && hasKey) continue;         // disponible con clave
-    if (hasKey) {
-      patch[field] = lang === "es" ? "gemini:Kore" : "gemini:Charon";
-    } else {
-      // Sin clave las voces Gemini no pueden sonar: se usa la del dispositivo.
-      const v = bestDeviceVoice(lang);
-      if (v) patch[field] = "device:" + v.voiceURI;
-    }
+    if (isDeviceVoice(current)) continue;
+    if (isGeminiVoice(current) && hasKey) continue;
+    const v = bestDeviceVoice(lang);
+    if (v) patch[field] = "device:" + v.voiceURI;
+    else if (hasKey) patch[field] = lang === "es" ? "gemini:Kore" : "gemini:Charon";
   }
   if (Object.keys(patch).length) saveSettings(patch);
 }
@@ -470,7 +528,7 @@ function trimCache() {
    para que la lectura continua nunca se corte. */
 function prefetch(from) {
   if (!state.doc) return;
-  for (let i = from; i < Math.min(from + 3, state.doc.segments.length); i++) {
+  for (let i = from; i < Math.min(from + 2, state.doc.segments.length); i++) {
     if (isGeminiVoice(voiceForLang(segLang(i)))) fetchSegmentAudio(i).catch(() => {});
   }
 }
@@ -612,10 +670,26 @@ async function playSegment(i, { autoScroll = true } = {}) {
     prefetch(i + 1);
   } catch (err) {
     if (token !== state.playToken) return;
+    // Si Google agotó la cuota, se sigue leyendo con la voz del dispositivo.
+    if (err.quota && switchToDeviceVoice(segLang(i))) {
+      toast("Cuota de Google agotada: seguimos con la voz de este dispositivo.");
+      playSegment(i, { autoScroll });
+      return;
+    }
     setPlayUI("paused");
     state.playing = false;
     toast(err.message || "No se pudo reproducir", true);
   }
+}
+
+/* Degradación elegante: cambia esa lengua a la mejor voz local disponible. */
+function switchToDeviceVoice(lang) {
+  const v = bestDeviceVoice(lang);
+  if (!v) return false;
+  saveSettings(lang === "es" ? { voice_es: "device:" + v.voiceURI } : { voice_en: "device:" + v.voiceURI });
+  state.cache.clear();
+  updateChips();
+  return true;
 }
 
 state.audio.addEventListener("ended", () => {
@@ -952,8 +1026,8 @@ function renderVoiceLists() {
   refreshDeviceVoices();
   const geminiReady = Boolean((state.settings.gemini_api_key || "").trim());
   $("voiceHint").textContent = geminiReady
-    ? "Las voces Gemini son las más naturales y suenan igual en todos tus dispositivos. Las del dispositivo funcionan sin conexión."
-    : "Para las voces Gemini (las más naturales) pega tu clave de Google AI Studio más abajo. Mientras tanto puedes usar las voces del dispositivo.";
+    ? "Las voces del dispositivo son ilimitadas y funcionan sin conexión. Las Gemini suenan mejor, pero el plan gratuito de Google solo permite unos pocos párrafos al día."
+    : "Las voces del dispositivo son ilimitadas y funcionan sin conexión. Para probar las voces Gemini pega tu clave de Google AI Studio más abajo (su plan gratuito solo alcanza para unos pocos párrafos al día).";
 
   for (const [lang, containerId] of [["es", "gemVoicesEs"], ["en", "gemVoicesEn"]]) {
     const wrap = $(containerId);
