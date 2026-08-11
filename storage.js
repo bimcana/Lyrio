@@ -2,7 +2,8 @@
 "use strict";
 
 const DB_NAME = "lyrio";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const AUDIO_CACHE_MAX = 300;      // párrafos guardados; evita regenerar (y gastar cuota) al releer
 let dbPromise = null;
 
 function openDb() {
@@ -13,6 +14,7 @@ function openDb() {
         const db = req.result;
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs");
         if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
+        if (!db.objectStoreNames.contains("audio")) db.createObjectStore("audio");
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -87,16 +89,36 @@ export async function cacheTranslation(target, text, translation) {
   await idbPut("kv", trKey(target, text), translation);
 }
 
+/* generated audio cache (Gemini voices): keeps re-reads free and instant */
+
+export function audioKey(voice, speedIrrelevant, text) {
+  return `${voice}:${text.length}:${hashCode(text)}`;
+}
+
+export async function getCachedAudio(key) {
+  return idbGet("audio", key);
+}
+
+export async function putCachedAudio(key, blob, durationMs) {
+  await idbPut("audio", key, { blob, durationMs });
+  const index = (await idbGet("kv", "audioIndex")) || [];
+  const trimmed = index.filter((k) => k !== key);
+  trimmed.push(key);
+  while (trimmed.length > AUDIO_CACHE_MAX) {
+    await idbDel("audio", trimmed.shift()).catch(() => {});
+  }
+  await idbPut("kv", "audioIndex", trimmed);
+}
+
 /* settings: small, synchronous access preferred -> localStorage */
 
 const SETTINGS_KEY = "lyrio-settings";
 
 export const DEFAULT_SETTINGS = {
-  proxy_url: "",
   gemini_api_key: "",
   gemini_model: "",
-  voice_es: "es-MX-DaliaNeural",
-  voice_en: "en-US-AvaMultilingualNeural",
+  voice_es: "gemini:Kore",
+  voice_en: "gemini:Charon",
   speed: 1.0,
   font: "sans",
   fontSize: 26,

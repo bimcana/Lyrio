@@ -1,29 +1,27 @@
 # Lyrio — Tu lectura, en voz alta
 
-Lector de PDF con voces naturales, resaltado palabra a palabra estilo karaoke, capítulos, modo inmersivo y traducción ES↔EN para practicar idiomas.
+Lector de PDF con voces naturales, resaltado palabra a palabra estilo karaoke, capítulos, modo inmersivo y traducción ES ↔ EN para practicar idiomas.
 
 **App:** https://bimcana.github.io/Lyrio/
 
 ## Cómo funciona
 
-- Abre la app y arrastra (o toca para elegir) un PDF.
-- Todo se guarda **en tu dispositivo**: el PDF procesado, tu progreso de lectura y tus ajustes. Nada se sube a ningún servidor.
-- Las voces usan el sintetizador integrado del dispositivo. En **Microsoft Edge** (PC) son las voces neuronales de máxima calidad; en iPhone/iPad son las voces de Apple (mejorables en Ajustes → Accesibilidad → Contenido leído → Voces).
-- En iPhone/iPad: botón Compartir → **Añadir a pantalla de inicio** para instalarla como app.
+- Arrastra un PDF (o tócalo para elegirlo) y pulsa reproducir.
+- Todo se guarda **en tu dispositivo**: el documento procesado, tu progreso y tus ajustes. Nada se sube a ningún servidor.
+- Toca el título del documento para saltar entre capítulos. Durante la lectura los controles se ocultan; un toque en un espacio vacío los muestra.
+- En iPhone/iPad: Compartir → **Añadir a pantalla de inicio** para instalarla como app.
 
-## Motor de voz neuronal (opcional)
+## Voces
 
-Da voces neuronales de máxima calidad (Dalia, Jorge, Ramona, Ava…) en **todos** los dispositivos, incluido el iPhone. No guarda ningún dato: recibe el texto de un párrafo y devuelve el audio.
+- **Gemini** — las más naturales, iguales en todos los dispositivos. Requieren una clave gratuita de [Google AI Studio](https://aistudio.google.com/apikey), que se pega una vez en ⚙ Ajustes. La misma clave activa la traducción.
+- **Del dispositivo** — sin clave y sin conexión. En PC con Microsoft Edge son voces neuronales de alta calidad.
 
-- **[`motor-voz/`](motor-voz/)** — Python + Docker, para Koyeb o Render (plan gratuito; el servicio se duerme sin uso).
-- **[`motor-cloudflare/worker.js`](motor-cloudflare/worker.js)** — la misma lógica en un solo archivo JS para Cloudflare Workers. **No operativo hoy:** Microsoft rechaza las sesiones que llegan desde las IPs de Cloudflare (el código es correcto y funciona en local; se conserva por si esa restricción cambia).
+El audio generado queda guardado en el dispositivo: releer no vuelve a consumir cuota.
 
-Luego pega la dirección resultante en ⚙ Ajustes → Motor de voz, en cada dispositivo.
+## Privacidad
 
-## Traducción (opcional)
-
-⚙ Ajustes → Traducción → pega tu API key gratuita de [Google AI Studio](https://aistudio.google.com/apikey).
+El PDF se procesa dentro del navegador y nunca se sube. Solo viaja a Google el texto del párrafo que se está leyendo, para generar la voz o la traducción.
 
 ## Créditos
 
-Extracción de PDF con [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0, Mozilla). Interfaz y motor de lectura propios.
+Extracción de PDF con [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0, Mozilla).

@@ -6,33 +6,126 @@ import {
   DEFAULT_SETTINGS, loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation,
+  audioKey, getCachedAudio, putCachedAudio,
 } from "./storage.js";
 
 const $ = (id) => document.getElementById(id);
 
-const VOICES = [
-  { id: "es-MX-DaliaNeural", name: "Dalia", region: "México", gender: "F", lang: "es" },
-  { id: "es-MX-JorgeNeural", name: "Jorge", region: "México", gender: "M", lang: "es" },
-  { id: "es-US-PalomaNeural", name: "Paloma", region: "Latino EE.UU.", gender: "F", lang: "es" },
-  { id: "es-US-AlonsoNeural", name: "Alonso", region: "Latino EE.UU.", gender: "M", lang: "es" },
-  { id: "es-DO-RamonaNeural", name: "Ramona", region: "Rep. Dominicana", gender: "F", lang: "es" },
-  { id: "es-DO-EmilioNeural", name: "Emilio", region: "Rep. Dominicana", gender: "M", lang: "es" },
-  { id: "es-CO-SalomeNeural", name: "Salomé", region: "Colombia", gender: "F", lang: "es" },
-  { id: "es-CO-GonzaloNeural", name: "Gonzalo", region: "Colombia", gender: "M", lang: "es" },
-  { id: "es-AR-ElenaNeural", name: "Elena", region: "Argentina", gender: "F", lang: "es" },
-  { id: "es-AR-TomasNeural", name: "Tomás", region: "Argentina", gender: "M", lang: "es" },
-  { id: "en-US-AvaMultilingualNeural", name: "Ava", region: "US · Multilingual", gender: "F", lang: "en" },
-  { id: "en-US-AndrewMultilingualNeural", name: "Andrew", region: "US · Multilingual", gender: "M", lang: "en" },
-  { id: "en-US-EmmaMultilingualNeural", name: "Emma", region: "US · Multilingual", gender: "F", lang: "en" },
-  { id: "en-US-BrianMultilingualNeural", name: "Brian", region: "US · Multilingual", gender: "M", lang: "en" },
-  { id: "en-US-JennyNeural", name: "Jenny", region: "US", gender: "F", lang: "en" },
-  { id: "en-US-GuyNeural", name: "Guy", region: "US", gender: "M", lang: "en" },
-  { id: "en-US-AriaNeural", name: "Aria", region: "US", gender: "F", lang: "en" },
-  { id: "en-US-ChristopherNeural", name: "Christopher", region: "US", gender: "M", lang: "en" },
-];
-
 const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"];
 const geminiBadModels = new Set();
+
+/* ---------- Gemini TTS: voces neuronales sin servidor ---------- */
+
+const GEMINI_TTS_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
+const geminiBadTtsModels = new Set();
+
+// Multilingües: la misma voz lee español e inglés según el texto.
+const GEMINI_VOICES = [
+  { name: "Kore", gender: "F", tone: "Firme" },
+  { name: "Zephyr", gender: "F", tone: "Brillante" },
+  { name: "Leda", gender: "F", tone: "Juvenil" },
+  { name: "Aoede", gender: "F", tone: "Ligera" },
+  { name: "Puck", gender: "M", tone: "Animado" },
+  { name: "Charon", gender: "M", tone: "Informativo" },
+  { name: "Orus", gender: "M", tone: "Firme" },
+  { name: "Fenrir", gender: "M", tone: "Enérgico" },
+];
+
+const isGeminiVoice = (id) => typeof id === "string" && id.startsWith("gemini:");
+
+function pcmToWav(pcm, sampleRate) {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const put = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  put(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length, true);
+  put(8, "WAVE");
+  put(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);              // PCM
+  view.setUint16(22, 1, true);              // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // bytes por segundo
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);             // 16 bits
+  put(36, "data");
+  view.setUint32(40, pcm.length, true);
+  return new Blob([header, pcm], { type: "audio/wav" });
+}
+
+/* Gemini no devuelve tiempos por palabra: se reparten sobre la duración real
+   del audio, dando más peso a las palabras largas y a las pausas de puntuación. */
+function estimateWords(text, durationMs) {
+  const tokens = [...text.matchAll(/\S+/g)];
+  if (!tokens.length) return [];
+  const weights = tokens.map((m) => {
+    let weight = m[0].length + 1.4;
+    if (/[,;:)"]$/.test(m[0])) weight += 2.5;
+    if (/[.!?…]$/.test(m[0])) weight += 5;
+    return weight;
+  });
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const lead = Math.min(260, durationMs * 0.04);          // silencio inicial típico
+  const speakable = Math.max(0, durationMs - lead * 1.6);
+  let t = lead;
+  return tokens.map((m, k) => {
+    const dur = (weights[k] / totalWeight) * speakable;
+    const word = {
+      w: m[0], s: Math.round(t), e: Math.round(t + dur),
+      cs: m.index, ce: m.index + m[0].length,
+    };
+    t += dur;
+    return word;
+  });
+}
+
+async function geminiSpeak(text, voiceName) {
+  const apiKey = (state.settings.gemini_api_key || "").trim();
+  if (!apiKey) {
+    throw new Error("Configura tu API key de Google AI Studio en Ajustes para usar las voces Gemini.");
+  }
+  const models = GEMINI_TTS_MODELS.filter((m) => !geminiBadTtsModels.has(m));
+  const payload = {
+    contents: [{ parts: [{ text: `Lee en voz alta el siguiente texto, con tono natural y sin añadir nada:\n\n${text}` }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+    },
+  };
+  let lastError = "sin modelos de voz disponibles";
+
+  for (const model of models.length ? models : GEMINI_TTS_MODELS) {
+    let res;
+    try {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      throw new Error("Sin conexión con Google (¿hay internet?)");
+    }
+    if (res.ok) {
+      const part = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (!part?.data) throw new Error("Gemini no devolvió audio");
+      const pcm = Uint8Array.from(atob(part.data), (c) => c.charCodeAt(0));
+      const rate = Number(/rate=(\d+)/.exec(part.mimeType || "")?.[1]) || 24000;
+      return { blob: pcmToWav(pcm, rate), durationMs: (pcm.length / 2 / rate) * 1000 };
+    }
+    let message = "";
+    try { message = (await res.json())?.error?.message || ""; } catch {}
+    lastError = message || `HTTP ${res.status}`;
+    if (res.status === 429) {
+      throw new Error("Alcanzaste el límite de uso gratuito de Google por ahora. Espera un momento o cambia a una voz del dispositivo.");
+    }
+    if (UNAVAILABLE_HINTS.some((h) => message.toLowerCase().includes(h))) {
+      geminiBadTtsModels.add(model);
+      continue;
+    }
+    throw new Error(`Voces Gemini: ${lastError}`);
+  }
+  throw new Error(`Voces Gemini: ${lastError}`);
+}
 
 /* ---------- device voices (Web Speech API — no external service needed) ---------- */
 
@@ -72,17 +165,22 @@ function bestDeviceVoice(lang) {
   return pool[0] || null;    // deviceVoices is already quality-ranked
 }
 
-/* If no external engine is configured, default to the device's best voices. */
+/* Si la voz guardada no puede sonar en este dispositivo, se elige la mejor
+   disponible: Gemini cuando hay clave, si no la del propio dispositivo. */
 function autoPickDeviceVoices() {
-  if (proxyUrl()) return;
+  const hasKey = Boolean((state.settings.gemini_api_key || "").trim());
   const patch = {};
-  if (!isDeviceVoice(state.settings.voice_es)) {
-    const v = bestDeviceVoice("es");
-    if (v) patch.voice_es = "device:" + v.voiceURI;
-  }
-  if (!isDeviceVoice(state.settings.voice_en)) {
-    const v = bestDeviceVoice("en");
-    if (v) patch.voice_en = "device:" + v.voiceURI;
+  for (const [lang, field] of [["es", "voice_es"], ["en", "voice_en"]]) {
+    const current = state.settings[field];
+    if (isDeviceVoice(current)) continue;                  // siempre disponible
+    if (isGeminiVoice(current) && hasKey) continue;         // disponible con clave
+    if (hasKey) {
+      patch[field] = lang === "es" ? "gemini:Kore" : "gemini:Charon";
+    } else {
+      // Sin clave las voces Gemini no pueden sonar: se usa la del dispositivo.
+      const v = bestDeviceVoice(lang);
+      if (v) patch[field] = "device:" + v.voiceURI;
+    }
   }
   if (Object.keys(patch).length) saveSettings(patch);
 }
@@ -140,10 +238,6 @@ function saveSettings(patch) {
   Object.assign(state.settings, patch);
   applyDisplaySettings();
   persistSettings(state.settings);
-}
-
-function proxyUrl() {
-  return (state.settings.proxy_url || "").trim().replace(/\/+$/, "");
 }
 
 function segLang(i) {
@@ -294,6 +388,16 @@ function setCurrent(i, { scroll = true, instant = false } = {}) {
   updateChips();
   if (state.translateOn) ensureTranslation(i);
   schedulePositionSave();
+  schedulePrefetch(i);
+}
+
+/* Generar voz tarda; se adelanta el trabajo mientras lees para no esperar al pulsar play. */
+let prefetchTimer = 0;
+function schedulePrefetch(i) {
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(() => {
+    if (state.doc && !state.playing) prefetch(i);
+  }, 900);
 }
 
 function restorePlainText(el) {
@@ -323,36 +427,30 @@ function renderWordSpans(el, i, words) {
 
 /* ---------- TTS via voice engine ---------- */
 
-function ttsKey(i) {
-  return `${i}|${voiceForLang(segLang(i))}|${state.settings.speed}`;
+// Sin la velocidad: el audio se genera una vez y se acelera al reproducir.
+const ttsKey = (i) => `${i}|${voiceForLang(segLang(i))}`;
+
+function fetchGeminiSegment(i) {
+  const seg = state.doc.segments[i];
+  const voiceName = voiceForLang(segLang(i)).slice("gemini:".length);
+  const cacheKey = audioKey(voiceName, null, seg.text);
+  return (async () => {
+    let entry = await getCachedAudio(cacheKey).catch(() => null);
+    if (!entry) {
+      entry = await geminiSpeak(seg.text, voiceName);
+      putCachedAudio(cacheKey, entry.blob, entry.durationMs).catch(() => {});
+    }
+    return {
+      url: URL.createObjectURL(entry.blob),
+      words: estimateWords(seg.text, entry.durationMs),
+    };
+  })();
 }
 
 function fetchSegmentAudio(i) {
   const key = ttsKey(i);
   if (state.cache.has(key)) return state.cache.get(key);
-  const base = proxyUrl();
-  if (!base) {
-    return Promise.reject(new Error("Configura el motor de voz en Ajustes (dirección del servicio)."));
-  }
-  const seg = state.doc.segments[i];
-  const promise = fetch(`${base}/tts`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: seg.text, voice: voiceForLang(segLang(i)), speed: state.settings.speed }),
-  }).then(async (res) => {
-    if (!res.ok) {
-      let msg = `Motor de voz: error ${res.status}`;
-      try { msg = (await res.json()).detail || msg; } catch {}
-      throw new Error(msg);
-    }
-    const data = await res.json();
-    const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
-    const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
-    return { url, words: data.words };
-  }).catch((err) => {
-    if (err instanceof TypeError) throw new Error("No se pudo contactar el motor de voz (¿hay internet?)");
-    throw err;
-  });
+  const promise = fetchGeminiSegment(i);
   promise.catch(() => state.cache.delete(key));
   state.cache.set(key, promise);
   trimCache();
@@ -368,13 +466,22 @@ function trimCache() {
   }
 }
 
+/* Generar voz tarda unos segundos: se adelantan los párrafos siguientes
+   para que la lectura continua nunca se corte. */
 function prefetch(from) {
-  for (let i = from; i < Math.min(from + 2, state.doc.segments.length); i++) {
-    if (!isDeviceVoice(voiceForLang(segLang(i)))) fetchSegmentAudio(i);
+  if (!state.doc) return;
+  for (let i = from; i < Math.min(from + 3, state.doc.segments.length); i++) {
+    if (isGeminiVoice(voiceForLang(segLang(i)))) fetchSegmentAudio(i).catch(() => {});
   }
 }
 
 /* ---------- playback engine ---------- */
+
+/* El audio Gemini se genera una sola vez: la velocidad se ajusta al reproducir. */
+function applyPlaybackRate() {
+  state.audio.preservesPitch = true;      // acelera sin subir el tono
+  state.audio.playbackRate = state.settings.speed;
+}
 
 function wordsFromText(text) {
   const words = [];
@@ -492,6 +599,7 @@ async function playSegment(i, { autoScroll = true } = {}) {
     state.words = words;
     renderWordSpans(segEl(i), i, words);
     state.audio.src = url;
+    applyPlaybackRate();
     await state.audio.play();
     if (token !== state.playToken) { state.audio.pause(); return; }
     state.playing = true;
@@ -812,22 +920,19 @@ function openChapters() {
 
 /* ---------- chips & sheet ---------- */
 
-function voiceById(id) {
-  return VOICES.find((v) => v.id === id);
-}
-
 function shortDeviceName(name) {
   return name.replace(/^Microsoft\s+/i, "").replace(/^Google\s+/i, "")
     .split(/\s+Online|\s*\(|\s*-\s/)[0].trim() || name;
 }
 
 function voiceLabel(id) {
-  if (isDeviceVoice(id)) {
-    const v = deviceVoiceByRef(id);
-    return v ? `${shortDeviceName(v.name)} · 📱` : "Voz del dispositivo";
+  if (isGeminiVoice(id)) {
+    const name = id.slice("gemini:".length);
+    const v = GEMINI_VOICES.find((x) => x.name === name);
+    return `${name} · ${v ? (v.gender === "F" ? "♀" : "♂") : "✨"}`;
   }
-  const v = voiceById(id);
-  return v ? `${v.name} · ${v.gender === "F" ? "♀" : "♂"}` : "Voz";
+  const v = deviceVoiceByRef(id);
+  return v ? `${shortDeviceName(v.name)} · 📱` : "Voz";
 }
 
 function updateChips() {
@@ -845,22 +950,23 @@ function selectVoice(lang, id) {
 
 function renderVoiceLists() {
   refreshDeviceVoices();
-  const proxyReady = Boolean(proxyUrl());
-  $("voiceHint").textContent = proxyReady
-    ? ""
-    : "Las voces neuronales requieren configurar el motor de voz (más abajo). Mientras tanto, usa las voces integradas de este dispositivo.";
+  const geminiReady = Boolean((state.settings.gemini_api_key || "").trim());
+  $("voiceHint").textContent = geminiReady
+    ? "Las voces Gemini son las más naturales y suenan igual en todos tus dispositivos. Las del dispositivo funcionan sin conexión."
+    : "Para las voces Gemini (las más naturales) pega tu clave de Google AI Studio más abajo. Mientras tanto puedes usar las voces del dispositivo.";
 
-  for (const [lang, containerId] of [["es", "voicesEs"], ["en", "voicesEn"]]) {
+  for (const [lang, containerId] of [["es", "gemVoicesEs"], ["en", "gemVoicesEn"]]) {
     const wrap = $(containerId);
     wrap.innerHTML = "";
-    for (const v of VOICES.filter((x) => x.lang === lang)) {
-      const active = (lang === "es" ? state.settings.voice_es : state.settings.voice_en) === v.id;
+    for (const v of GEMINI_VOICES) {
+      const id = "gemini:" + v.name;
+      const active = (lang === "es" ? state.settings.voice_es : state.settings.voice_en) === id;
       const btn = document.createElement("button");
-      btn.className = "voice-item" + (active ? " active" : "") + (proxyReady ? "" : " disabled");
+      btn.className = "voice-item" + (active ? " active" : "") + (geminiReady ? "" : " disabled");
       btn.innerHTML = `<span class="vg">${v.gender === "F" ? "♀" : "♂"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
       btn.querySelector(".vn").textContent = v.name;
-      btn.querySelector(".vr").textContent = v.region;
-      if (proxyReady) btn.addEventListener("click", () => selectVoice(lang, v.id));
+      btn.querySelector(".vr").textContent = v.tone;
+      if (geminiReady) btn.addEventListener("click", () => selectVoice(lang, id));
       wrap.appendChild(btn);
     }
   }
@@ -884,8 +990,13 @@ function renderVoiceLists() {
   }
 }
 
-function onVoiceOrSpeedChange() {
+function onVoiceOrSpeedChange({ speedOnly = false } = {}) {
   if (!state.doc) return;
+  // Con Gemini el audio no depende de la velocidad: basta ajustar la reproducción.
+  if (speedOnly && isGeminiVoice(voiceForLang(segLang(state.index)))) {
+    applyPlaybackRate();
+    return;
+  }
   if (state.playing) {
     playSegment(state.index);
   } else {
@@ -901,10 +1012,6 @@ function openSheet() {
   $("speedValue").textContent = `${state.settings.speed.toFixed(2).replace(/0$/, "")}×`;
   $("sizeSlider").value = state.settings.fontSize;
   $("sizeValue").textContent = `${state.settings.fontSize}px`;
-  $("proxyUrl").value = state.settings.proxy_url || "";
-  $("proxyStatus").textContent = state.settings.proxy_url
-    ? ""
-    : "Opcional: sin él se usan las voces integradas del dispositivo.";
   $("geminiKey").value = state.settings.gemini_api_key || "";
   $("keyStatus").textContent = state.settings.gemini_api_key ? "✓ Clave configurada" : "";
   highlightChipRows();
@@ -970,7 +1077,7 @@ function wireEvents() {
     saveSettings({ speed });
     updateChips();
   });
-  $("speedSlider").addEventListener("change", onVoiceOrSpeedChange);
+  $("speedSlider").addEventListener("change", () => onVoiceOrSpeedChange({ speedOnly: true }));
   $("sizeSlider").addEventListener("input", (e) => {
     saveSettings({ fontSize: Number(e.target.value) });
     $("sizeValue").textContent = `${e.target.value}px`;
@@ -987,31 +1094,16 @@ function wireEvents() {
     const width = e.target.closest(".chip")?.dataset.width;
     if (width) { saveSettings({ width }); highlightChipRows(); }
   });
-  $("saveProxy").addEventListener("click", async () => {
-    const url = $("proxyUrl").value.trim().replace(/\/+$/, "");
-    saveSettings({ proxy_url: url });
-    state.cache.clear();
-    renderVoiceLists();
-    if (!url) {
-      autoPickDeviceVoices();
-      renderVoiceLists();
-      updateChips();
-      $("proxyStatus").textContent = "Sin motor externo: se usan las voces del dispositivo.";
-      return;
-    }
-    $("proxyStatus").textContent = "Comprobando…";
-    try {
-      const res = await fetch(url + "/", { method: "GET" });
-      const ok = res.ok && (await res.json()).service === "lyrio-voice";
-      $("proxyStatus").textContent = ok ? "✓ Motor de voz conectado" : "⚠ Responde, pero no parece ser el motor de Lyrio";
-    } catch {
-      $("proxyStatus").textContent = "⚠ No se pudo conectar con esa dirección";
-    }
-  });
   $("saveKey").addEventListener("click", () => {
-    saveSettings({ gemini_api_key: $("geminiKey").value.trim() });
-    $("keyStatus").textContent = $("geminiKey").value.trim() ? "✓ Clave guardada" : "Clave eliminada";
+    const key = $("geminiKey").value.trim();
+    saveSettings({ gemini_api_key: key });
+    $("keyStatus").textContent = key
+      ? "✓ Clave guardada — ya puedes usar las voces Gemini y la traducción"
+      : "Clave eliminada";
     state.translations.clear();
+    autoPickDeviceVoices();
+    renderVoiceLists();
+    updateChips();
   });
 
   document.addEventListener("keydown", (e) => {
@@ -1036,4 +1128,7 @@ function boot() {
 boot();
 
 // debug/test handle (harmless in production)
-window.lyrio = { state, uploadFile, jumpTo, togglePlay, pausePlayback, setImmersive, openChapters, saveSettings, exitReader };
+window.lyrio = {
+  state, uploadFile, jumpTo, togglePlay, pausePlayback, setImmersive, openChapters,
+  saveSettings, exitReader, estimateWords, pcmToWav, renderVoiceLists, openSheet, closeSheet,
+};

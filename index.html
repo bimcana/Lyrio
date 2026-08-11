@@ -88,10 +88,10 @@
     <section id="secVoice">
       <h3>Voz</h3>
       <p class="hint" id="voiceHint"></p>
+      <div class="voice-group"><h4>Gemini · para el español</h4><div id="gemVoicesEs" class="voice-list"></div></div>
+      <div class="voice-group"><h4>Gemini · para el inglés</h4><div id="gemVoicesEn" class="voice-list"></div></div>
       <div class="voice-group"><h4>Este dispositivo · Español</h4><div id="devVoicesEs" class="voice-list"></div></div>
       <div class="voice-group"><h4>Este dispositivo · English</h4><div id="devVoicesEn" class="voice-list"></div></div>
-      <div class="voice-group"><h4>Neuronales · Español latino</h4><div id="voicesEs" class="voice-list"></div></div>
-      <div class="voice-group"><h4>Neuronales · English (US)</h4><div id="voicesEn" class="voice-list"></div></div>
     </section>
 
     <section id="secSpeed">
@@ -124,19 +124,9 @@
       </div>
     </section>
 
-    <section id="secEngine">
-      <h3>Motor de voz</h3>
-      <p class="hint">Dirección del servicio que genera las voces. Se configura una sola vez por dispositivo.</p>
-      <div class="key-row">
-        <input id="proxyUrl" type="url" placeholder="https://tu-espacio.hf.space" autocomplete="off">
-        <button id="saveProxy" class="chip">Guardar</button>
-      </div>
-      <p id="proxyStatus" class="hint"></p>
-    </section>
-
     <section id="secTranslate">
-      <h3>Traducción</h3>
-      <p class="hint">Muestra cada párrafo traducido (ES ↔ EN) mientras escuchas — ideal para practicar idiomas. Usa la API de Google AI Studio: consigue tu clave gratis en <strong>aistudio.google.com/apikey</strong>.</p>
+      <h3>Clave de Google AI Studio</h3>
+      <p class="hint">Activa las <strong>voces Gemini</strong> y la <strong>traducción</strong> ES ↔ EN bajo cada párrafo, ideal para practicar idiomas. Consigue tu clave gratis en <strong>aistudio.google.com/apikey</strong>. Se guarda solo en este dispositivo.</p>
       <div class="key-row">
         <input id="geminiKey" type="password" placeholder="API key de Google AI Studio" autocomplete="off">
         <button id="saveKey" class="chip">Guardar</button>
