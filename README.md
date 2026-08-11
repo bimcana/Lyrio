@@ -13,7 +13,12 @@ Lector de PDF con voces naturales, resaltado palabra a palabra estilo karaoke, c
 
 ## Motor de voz neuronal (opcional)
 
-La carpeta [`motor-voz/`](motor-voz/) contiene un microservicio opcional (sin datos, sin registro de nada) que da voces neuronales de máxima calidad en **todos** los dispositivos. Se despliega gratis en Hugging Face Spaces (SDK: Docker) subiendo sus 3 archivos; luego pega la URL del Space en ⚙ Ajustes → Motor de voz.
+Da voces neuronales de máxima calidad (Dalia, Jorge, Ramona, Ava…) en **todos** los dispositivos, incluido el iPhone. No guarda ningún dato: recibe el texto de un párrafo y devuelve el audio.
+
+- **[`motor-cloudflare/worker.js`](motor-cloudflare/worker.js)** — recomendado. Un solo archivo: se pega en un Worker de Cloudflare (plan gratuito, sin tarjeta, sin arranques lentos).
+- **[`motor-voz/`](motor-voz/)** — la misma funcionalidad en Python + Docker, por si prefieres Koyeb o Render.
+
+Luego pega la dirección resultante en ⚙ Ajustes → Motor de voz, en cada dispositivo.
 
 ## Traducción (opcional)
 
