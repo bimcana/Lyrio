@@ -120,7 +120,7 @@ function parseHeaders(bytes, headerLength) {
   return headers;
 }
 
-async function synthesize(text, voice, speed) {
+async function attempt(text, voice, speed, diag) {
   const gec = await secMsGec();
   const url =
     `https://${BASE}/edge/v1?TrustedClientToken=${TRUSTED_TOKEN}` +
@@ -141,20 +141,27 @@ async function synthesize(text, voice, speed) {
     },
   });
 
+  diag.status = resp.status;
   const ws = resp.webSocket;
-  if (!ws) throw new Error(`El servicio de voz rechazó la conexión (HTTP ${resp.status})`);
+  if (!ws) {
+    diag.note = await resp.text().catch(() => "");
+    throw new Error(`el servicio rechazó la conexión (HTTP ${resp.status})`);
+  }
   ws.accept();
 
   const chunks = [];
   const events = [];
   let total = 0;
+  diag.textMsgs = 0;
+  diag.binMsgs = 0;
 
   const done = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Tiempo de espera agotado")), 25000);
+    const timer = setTimeout(() => reject(new Error("tiempo de espera agotado")), 25000);
     const finish = (err) => { clearTimeout(timer); err ? reject(err) : resolve(); };
 
     ws.addEventListener("message", (evt) => {
       if (typeof evt.data === "string") {
+        diag.textMsgs++;
         const split = evt.data.indexOf("\r\n\r\n");
         const headers = parseHeaders(new TextEncoder().encode(evt.data), split);
         const path = headers.Path;
@@ -171,6 +178,7 @@ async function synthesize(text, voice, speed) {
           finish();
         }
       } else {
+        diag.binMsgs++;
         const bytes = new Uint8Array(evt.data);
         if (bytes.length < 2) return;
         const headerLength = (bytes[0] << 8) | bytes[1];
@@ -178,8 +186,12 @@ async function synthesize(text, voice, speed) {
         if (audio.length) { chunks.push(audio); total += audio.length; }
       }
     });
-    ws.addEventListener("close", () => finish());
-    ws.addEventListener("error", () => finish(new Error("Fallo de conexión con el servicio de voz")));
+    ws.addEventListener("close", (e) => {
+      diag.closeCode = e.code;
+      diag.closeReason = (e.reason || "").slice(0, 120);
+      finish();
+    });
+    ws.addEventListener("error", (e) => finish(new Error(`fallo de conexión${e?.message ? `: ${e.message}` : ""}`)));
   });
 
   const config =
@@ -205,7 +217,7 @@ async function synthesize(text, voice, speed) {
   );
 
   await done;
-  if (!total) throw new Error("El servicio no devolvió audio");
+  if (!total) throw new Error("el servicio no devolvió audio");
 
   const merged = new Uint8Array(total);
   let at = 0;
@@ -216,6 +228,25 @@ async function synthesize(text, voice, speed) {
     binary += String.fromCharCode(...merged.subarray(i, i + 0x8000));
   }
   return { audio: btoa(binary), words: alignWords(text, events) };
+}
+
+/* El servicio corta algunas sesiones abiertas desde redes de centros de datos.
+   Reintentar con una conexión nueva resuelve la mayoría de esos cortes. */
+async function synthesize(text, voice, speed) {
+  const attempts = [];
+  for (let i = 0; i < 3; i++) {
+    const diag = { try: i + 1 };
+    try {
+      return await attempt(text, voice, speed, diag);
+    } catch (err) {
+      diag.error = err.message;
+      attempts.push(diag);
+      if (i < 2) await new Promise((r) => setTimeout(r, 350 * (i + 1)));
+    }
+  }
+  const err = new Error(attempts[attempts.length - 1].error);
+  err.diag = attempts;
+  throw err;
 }
 
 /* ---------- rutas ---------- */
@@ -238,7 +269,7 @@ export default {
       try {
         return json(await synthesize(text, body.voice, body.speed ?? 1));
       } catch (err) {
-        return json({ detail: `Motor de voz: ${err.message}` }, 502);
+        return json({ detail: `Motor de voz: ${err.message}`, diag: err.diag }, 502);
       }
     }
 

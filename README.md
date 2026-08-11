@@ -15,8 +15,8 @@ Lector de PDF con voces naturales, resaltado palabra a palabra estilo karaoke, c
 
 Da voces neuronales de máxima calidad (Dalia, Jorge, Ramona, Ava…) en **todos** los dispositivos, incluido el iPhone. No guarda ningún dato: recibe el texto de un párrafo y devuelve el audio.
 
-- **[`motor-cloudflare/worker.js`](motor-cloudflare/worker.js)** — recomendado. Un solo archivo: se pega en un Worker de Cloudflare (plan gratuito, sin tarjeta, sin arranques lentos).
-- **[`motor-voz/`](motor-voz/)** — la misma funcionalidad en Python + Docker, por si prefieres Koyeb o Render.
+- **[`motor-voz/`](motor-voz/)** — Python + Docker, para Koyeb o Render (plan gratuito; el servicio se duerme sin uso).
+- **[`motor-cloudflare/worker.js`](motor-cloudflare/worker.js)** — la misma lógica en un solo archivo JS para Cloudflare Workers. **No operativo hoy:** Microsoft rechaza las sesiones que llegan desde las IPs de Cloudflare (el código es correcto y funciona en local; se conserva por si esa restricción cambia).
 
 Luego pega la dirección resultante en ⚙ Ajustes → Motor de voz, en cada dispositivo.
 
