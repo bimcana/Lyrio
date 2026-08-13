@@ -1,0 +1,15 @@
+{
+ "donde": "github-actions (Azure)",
+ "es": {
+  "voz": "es-DO-RamonaNeural",
+  "ok": true,
+  "audio_bytes": 35424,
+  "palabras": 15
+ },
+ "en": {
+  "voz": "en-US-AvaMultilingualNeural",
+  "ok": true,
+  "audio_bytes": 23328,
+  "palabras": 7
+ }
+}
