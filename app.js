@@ -2,13 +2,13 @@
    oraciones con las voces del propio dispositivo y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js";
-import { splitSentences } from "./sentences.js";
+import { extractFromPdf } from "./extract.js?v=4";
+import { splitSentences } from "./sentences.js?v=4";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation,
-} from "./storage.js";
+} from "./storage.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 
