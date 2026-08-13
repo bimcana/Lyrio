@@ -77,9 +77,11 @@ const PAGE_FURNITURE = /^\s*(\d{1,4}|[ivxlcdmIVXLCDM]{1,7}|[-–—|]{1,3}\s*\d{
    mitad de una frase: sin unirlos, la voz haría una pausa que rompe el sentido. */
 function continuesSentence(prev, next) {
   if (!prev.text || !next.text) return false;
-  if (Math.abs(prev.avgSize - next.avgSize) > 1.2) return false;   // tipografía distinta: no es continuación
+  const scale = Math.max(prev.avgSize, next.avgSize);
+  if (Math.abs(prev.avgSize - next.avgSize) > scale * 0.12) return false;  // tipografía distinta
   const hyphenated = /[-‐‑–]$/.test(prev.text);
   const openEnded = hyphenated || !/[.!?…:;»"'”’)\]]\s*$/.test(prev.text);
+  // Continúa si arranca en minúscula, o con una conjunción/preposición típica de enlace.
   const startsLower = /^[a-záéíóúüñ]/.test(next.text);
   return openEnded && startsLower;
 }
@@ -87,7 +89,9 @@ function continuesSentence(prev, next) {
 function joinContinuations(blocks) {
   const out = [];
   for (const block of blocks) {
-    if (PAGE_FURNITURE.test(block.text)) continue;                 // número de página suelto
+    // Los encabezados y pies corridos se descartan: además de leerse en voz alta,
+    // se interponían entre las dos mitades de una frase e impedían unirlas.
+    if (block.furniture || PAGE_FURNITURE.test(block.text)) continue;
     const prev = out[out.length - 1];
     if (prev && continuesSentence(prev, block)) {
       if (/[-‐‑–]$/.test(prev.text)) {
@@ -164,7 +168,7 @@ function linesFromItems(items) {
   return lines.filter((l) => l.text);
 }
 
-function blocksFromLines(lines, pageNumber) {
+function blocksFromLines(lines, pageNumber, pageHeight) {
   const blocks = [];
   let current = null;
   let prev = null;
@@ -175,13 +179,16 @@ function blocksFromLines(lines, pageNumber) {
       : false;
     const newBlock = !current || !prev || gap > Math.max(line.avgSize, prev.avgSize) * 1.7 || sizeJump;
     if (newBlock) {
-      current = { texts: [], weighted: 0, chars: 0, boldChars: 0, page: pageNumber };
+      current = { texts: [], weighted: 0, chars: 0, boldChars: 0, page: pageNumber,
+                  top: line.y, bottom: line.y };
       blocks.push(current);
     }
     current.texts.push(line.text);
     current.weighted += line.avgSize * line.chars;
     current.chars += line.chars;
     current.boldChars += line.boldFrac * line.chars;
+    current.top = Math.max(current.top, line.y);
+    current.bottom = Math.min(current.bottom, line.y);
     prev = line;
   }
   return blocks
@@ -191,8 +198,19 @@ function blocksFromLines(lines, pageNumber) {
       avgSize: b.chars ? b.weighted / b.chars : 10,
       boldFrac: b.chars ? b.boldChars / b.chars : 0,
       chars: b.chars,
+      // Encabezado o pie corrido: texto corto pegado al margen superior o inferior.
+      furniture: isRunningHeadOrFoot(b, pageHeight),
     }))
     .filter((b) => b.text.length >= MIN_SEGMENT_CHARS);
+}
+
+function isRunningHeadOrFoot(block, pageHeight) {
+  if (!pageHeight) return false;
+  const text = cleanBlock(block.texts.join(" "));
+  if (text.length > 90 || block.texts.length > 2) return false;
+  const nearTop = block.bottom > pageHeight * 0.92;
+  const nearBottom = block.top < pageHeight * 0.08;
+  return nearTop || nearBottom;
 }
 
 /* ---- chapters from the PDF outline (source A) ---- */
@@ -267,8 +285,9 @@ export async function extractFromPdf(arrayBuffer, fileName) {
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
+    const pageHeight = page.getViewport({ scale: 1 }).height;
     const lines = linesFromItems(content.items);
-    for (const block of blocksFromLines(lines, p)) {
+    for (const block of blocksFromLines(lines, p, pageHeight)) {
       rawBlocks.push(block);
       const key = Math.round(block.avgSize * 10) / 10;
       sizeCount.set(key, (sizeCount.get(key) || 0) + block.chars);
