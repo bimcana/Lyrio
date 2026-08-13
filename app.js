@@ -2,13 +2,13 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=8";
-import { splitSentences } from "./sentences.js?v=8";
+import { extractFromPdf } from "./extract.js?v=9";
+import { splitSentences } from "./sentences.js?v=9";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=8";
+} from "./storage.js?v=9";
 
 const $ = (id) => document.getElementById(id);
 
@@ -90,6 +90,7 @@ function applyDisplaySettings() {
   document.documentElement.dataset.theme = s.theme;
   document.documentElement.dataset.font = s.font;
   document.documentElement.dataset.width = s.width || "medio";
+  document.documentElement.dataset.align = s.align || "izquierda";
   document.documentElement.style.setProperty("--reading-size", s.fontSize + "px");
   // Del catálogo, no de getComputedStyle: durante la transición aún devuelve el color anterior.
   const meta = document.querySelector('meta[name="theme-color"]');
@@ -989,6 +990,8 @@ function highlightChipRows() {
     c.classList.toggle("active", c.dataset.font === state.settings.font));
   $("widthChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.width === (state.settings.width || "medio")));
+  $("alignChips").querySelectorAll(".chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.align === (state.settings.align || "izquierda")));
   const modo = state.settings.scrollMode || "auto";
   $("scrollChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.scroll === modo));
@@ -1105,6 +1108,10 @@ function wireEvents() {
   $("widthChips").addEventListener("click", (e) => {
     const width = e.target.closest(".chip")?.dataset.width;
     if (width) { saveSettings({ width }); highlightChipRows(); }
+  });
+  $("alignChips").addEventListener("click", (e) => {
+    const align = e.target.closest(".chip")?.dataset.align;
+    if (align) { saveSettings({ align }); highlightChipRows(); }
   });
   $("scrollChips").addEventListener("click", (e) => {
     const scrollMode = e.target.closest(".chip")?.dataset.scroll;

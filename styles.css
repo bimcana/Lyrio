@@ -128,7 +128,10 @@ body {
   color: var(--ink);
   font-family: var(--font-ui);
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior-y: none;
+  overscroll-behavior: none;
+  overflow-x: hidden;
+  /* Solo desplazamiento vertical: sin arrastre lateral ni zoom por pellizco. */
+  touch-action: pan-y;
   transition: background 0.4s;
 }
 
@@ -236,7 +239,14 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 }
 .icon-btn:hover { color: var(--ink-live); background: var(--bg-raised); }
 
-#stage { height: 100%; overflow-y: auto; scroll-behavior: smooth; }
+#stage {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+}
 #segments {
   max-width: var(--reading-width, 640px);
   margin: 0 auto;
@@ -250,7 +260,18 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
   color: var(--ink-dim);
   margin-bottom: 1.35em;
   transition: color 0.35s;
+  /* El texto se marca con el menú de subrayado, no con la selección del
+     sistema: así mantener pulsado no arrastra ni selecciona la página. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  overflow-wrap: break-word;
 }
+
+html[data-align="izquierda"]   .seg { text-align: left; }
+html[data-align="centro"]      .seg { text-align: center; }
+html[data-align="derecha"]     .seg { text-align: right; }
+html[data-align="justificado"] .seg { text-align: justify; hyphens: auto; -webkit-hyphens: auto; }
 .seg.near { color: var(--ink); }
 .seg.current { color: var(--ink); }
 
@@ -261,7 +282,10 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
   -webkit-box-decoration-break: clone;
   transition: color 0.3s, background 0.2s;
 }
-.sn:hover { background: var(--lamp-soft); }
+/* Solo con ratón: en pantallas táctiles el hover se queda pegado. */
+@media (hover: hover) and (pointer: fine) {
+  .sn:hover { background: var(--lamp-soft); }
+}
 .seg.current .sn.done { color: var(--ink-live); }
 .seg.current .sn.active { color: var(--ink); }
 .sn.picked { outline: 2px solid var(--lamp); outline-offset: 2px; }

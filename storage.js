@@ -105,6 +105,7 @@ export const DEFAULT_SETTINGS = {
   theme: "kindle",
   width: "medio",
   scrollMode: "auto",     // auto | siempre | parrafo | manual
+  align: "izquierda",     // izquierda | centro | derecha | justificado
 };
 
 /* subrayados por documento: { "parrafo:oracion": color } */
