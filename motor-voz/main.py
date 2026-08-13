@@ -17,29 +17,24 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-VOICES = [
-    {"id": "es-MX-DaliaNeural", "name": "Dalia", "region": "México", "gender": "F", "lang": "es"},
-    {"id": "es-MX-JorgeNeural", "name": "Jorge", "region": "México", "gender": "M", "lang": "es"},
-    {"id": "es-US-PalomaNeural", "name": "Paloma", "region": "Latino EE.UU.", "gender": "F", "lang": "es"},
-    {"id": "es-US-AlonsoNeural", "name": "Alonso", "region": "Latino EE.UU.", "gender": "M", "lang": "es"},
-    {"id": "es-DO-RamonaNeural", "name": "Ramona", "region": "Rep. Dominicana", "gender": "F", "lang": "es"},
-    {"id": "es-DO-EmilioNeural", "name": "Emilio", "region": "Rep. Dominicana", "gender": "M", "lang": "es"},
-    {"id": "es-CO-SalomeNeural", "name": "Salomé", "region": "Colombia", "gender": "F", "lang": "es"},
-    {"id": "es-CO-GonzaloNeural", "name": "Gonzalo", "region": "Colombia", "gender": "M", "lang": "es"},
-    {"id": "es-AR-ElenaNeural", "name": "Elena", "region": "Argentina", "gender": "F", "lang": "es"},
-    {"id": "es-AR-TomasNeural", "name": "Tomás", "region": "Argentina", "gender": "M", "lang": "es"},
-    {"id": "en-US-AvaMultilingualNeural", "name": "Ava", "region": "US · Multilingual", "gender": "F", "lang": "en"},
-    {"id": "en-US-AndrewMultilingualNeural", "name": "Andrew", "region": "US · Multilingual", "gender": "M", "lang": "en"},
-    {"id": "en-US-EmmaMultilingualNeural", "name": "Emma", "region": "US · Multilingual", "gender": "F", "lang": "en"},
-    {"id": "en-US-BrianMultilingualNeural", "name": "Brian", "region": "US · Multilingual", "gender": "M", "lang": "en"},
-    {"id": "en-US-JennyNeural", "name": "Jenny", "region": "US", "gender": "F", "lang": "en"},
-    {"id": "en-US-GuyNeural", "name": "Guy", "region": "US", "gender": "M", "lang": "en"},
-    {"id": "en-US-AriaNeural", "name": "Aria", "region": "US", "gender": "F", "lang": "en"},
-    {"id": "en-US-ChristopherNeural", "name": "Christopher", "region": "US", "gender": "M", "lang": "en"},
-]
-VOICE_IDS = {v["id"] for v in VOICES}
+# Nombre en español de cada país, para agrupar el catálogo en la app.
+PAISES = {
+    "AR": "Argentina", "BO": "Bolivia", "CL": "Chile", "CO": "Colombia", "CR": "Costa Rica",
+    "CU": "Cuba", "DO": "Rep. Dominicana", "EC": "Ecuador", "ES": "España", "GQ": "Guinea Ecuatorial",
+    "GT": "Guatemala", "HN": "Honduras", "MX": "México", "NI": "Nicaragua", "PA": "Panamá",
+    "PE": "Perú", "PR": "Puerto Rico", "PY": "Paraguay", "SV": "El Salvador", "US": "EE.UU.",
+    "UY": "Uruguay", "VE": "Venezuela",
+    "AU": "Australia", "CA": "Canadá", "GB": "Reino Unido", "HK": "Hong Kong", "IE": "Irlanda",
+    "IN": "India", "KE": "Kenia", "NG": "Nigeria", "NZ": "Nueva Zelanda", "PH": "Filipinas",
+    "SG": "Singapur", "TZ": "Tanzania", "ZA": "Sudáfrica",
+}
 
-MAX_TEXT = 2000
+# El catálogo se descubre del servicio al arrancar: así aparecen todas las
+# voces disponibles sin tener que mantener una lista a mano.
+VOICES: list[dict] = []
+VOICE_IDS: set[str] = set()
+
+MAX_TEXT = 4000                                  # un párrafo completo cabe de sobra
 _cache: OrderedDict[str, dict] = OrderedDict()   # tiny warm cache, RAM only
 _CACHE_MAX = 120
 
@@ -50,6 +45,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def cargar_catalogo() -> None:
+    """Descubre todas las voces neuronales en español e inglés."""
+    global VOICES, VOICE_IDS
+    try:
+        disponibles = await edge_tts.list_voices()
+    except Exception:
+        return                                   # sin catálogo, /tts sigue aceptando cualquier id
+    catalogo = []
+    for v in disponibles:
+        locale = v.get("Locale", "")
+        if not (locale.startswith("es-") or locale.startswith("en-")):
+            continue
+        idioma, pais = locale.split("-")[:2]
+        catalogo.append({
+            "id": v["ShortName"],
+            "name": v["ShortName"].split("-")[-1].replace("Neural", ""),
+            "region": PAISES.get(pais, pais),
+            "gender": "F" if v.get("Gender") == "Female" else "M",
+            "lang": idioma,
+        })
+    catalogo.sort(key=lambda x: (x["lang"], x["region"], x["name"]))
+    VOICES = catalogo
+    VOICE_IDS = {v["id"] for v in catalogo}
 
 
 def _rate_string(speed: float) -> str:
@@ -108,7 +129,10 @@ async def tts(body: TTSBody):
         raise HTTPException(400, "Texto vacío")
     if len(text) > MAX_TEXT:
         raise HTTPException(400, "Texto demasiado largo")
-    if body.voice not in VOICE_IDS:
+    # Formato de voz válido; el catálogo solo filtra si ya se cargó.
+    if not re.fullmatch(r"[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural", body.voice):
+        raise HTTPException(400, "Voz desconocida")
+    if VOICE_IDS and body.voice not in VOICE_IDS:
         raise HTTPException(400, "Voz desconocida")
 
     rate = _rate_string(body.speed)
