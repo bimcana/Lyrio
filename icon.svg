@@ -1,14 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <defs>
-    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
-      <stop offset="0" stop-color="#FFB454" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#FFB454" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <rect width="512" height="512" rx="116" fill="#12101A"/>
-  <rect width="512" height="512" rx="116" fill="url(#glow)"/>
-  <rect x="118" y="150" width="276" height="34" rx="17" fill="#575071"/>
-  <rect x="118" y="238" width="220" height="34" rx="17" fill="#FFB454"/>
-  <rect x="352" y="238" width="42" height="34" rx="17" fill="#3A3450"/>
-  <rect x="118" y="326" width="276" height="34" rx="17" fill="#3A3450"/>
+  <rect width="512" height="512" rx="112" fill="#F4F5F7"/>
+
+  <!-- headphone band, arcing above the book -->
+  <path d="M108 292 A150 150 0 0 1 404 292" fill="none" stroke="#4E79DE" stroke-width="34" stroke-linecap="round"/>
+  <path d="M120 288 A138 138 0 0 1 392 288" fill="none" stroke="#8FB4F8" stroke-width="11" stroke-linecap="round"/>
+
+  <!-- ear cups, peeking out at both sides -->
+  <rect x="62" y="266" width="90" height="136" rx="45" fill="#E7EDF8"/>
+  <rect x="76" y="278" width="76" height="112" rx="38" fill="#4E79DE"/>
+  <path d="M76 336 h76 v16 a38 38 0 0 1 -38 38 a38 38 0 0 1 -38 -38 Z" fill="#2B3A55"/>
+  <rect x="86" y="288" width="24" height="50" rx="12" fill="#87ABF4"/>
+
+  <rect x="360" y="266" width="90" height="136" rx="45" fill="#E7EDF8"/>
+  <rect x="360" y="278" width="76" height="112" rx="38" fill="#4E79DE"/>
+  <path d="M360 336 h76 v16 a38 38 0 0 1 -38 38 a38 38 0 0 1 -38 -38 Z" fill="#2B3A55"/>
+  <rect x="402" y="288" width="24" height="50" rx="12" fill="#87ABF4"/>
+
+  <!-- pages -->
+  <path d="M256 268 C220 214 186 190 152 182 L152 300 C190 310 224 330 256 356 Z" fill="#FFFFFF"/>
+  <path d="M256 268 C292 214 326 190 360 182 L360 300 C322 310 288 330 256 356 Z" fill="#EAEFF7"/>
+  <path d="M256 278 C242 238 226 214 212 200 L212 302 C228 314 244 326 256 342 Z" fill="#D9E1F0"/>
+  <path d="M256 278 C270 238 286 214 300 200 L300 302 C284 314 268 326 256 342 Z" fill="#F9FBFF"/>
+
+  <!-- covers -->
+  <path d="M256 296 L118 200 L118 356 L256 452 Z" fill="#D08F08"/>
+  <path d="M256 296 L394 200 L394 356 L256 452 Z" fill="#F0B01E"/>
+  <path d="M118 200 L256 296 L256 312 L118 216 Z" fill="#B57A05"/>
+  <path d="M394 200 L256 296 L256 312 L394 216 Z" fill="#D89B10"/>
+  <rect x="250" y="294" width="12" height="158" fill="#A96A05"/>
 </svg>

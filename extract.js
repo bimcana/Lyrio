@@ -69,6 +69,40 @@ export function detectLanguage(text) {
   return es >= en ? "es" : "en";
 }
 
+/* Encabezados y pies de página sueltos (números, romanos): estorban la lectura. */
+const PAGE_FURNITURE = /^\s*(\d{1,4}|[ivxlcdmIVXLCDM]{1,7}|[-–—|]{1,3}\s*\d{1,4}\s*[-–—|]{1,3})\s*$/;
+
+/* Un bloque continúa la oración anterior cuando esta quedó abierta y el
+   siguiente arranca en minúscula. Es lo que ocurre al cortar una página en
+   mitad de una frase: sin unirlos, la voz haría una pausa que rompe el sentido. */
+function continuesSentence(prev, next) {
+  if (!prev.text || !next.text) return false;
+  if (Math.abs(prev.avgSize - next.avgSize) > 1.2) return false;   // tipografía distinta: no es continuación
+  const hyphenated = /[-‐‑–]$/.test(prev.text);
+  const openEnded = hyphenated || !/[.!?…:;»"'”’)\]]\s*$/.test(prev.text);
+  const startsLower = /^[a-záéíóúüñ]/.test(next.text);
+  return openEnded && startsLower;
+}
+
+function joinContinuations(blocks) {
+  const out = [];
+  for (const block of blocks) {
+    if (PAGE_FURNITURE.test(block.text)) continue;                 // número de página suelto
+    const prev = out[out.length - 1];
+    if (prev && continuesSentence(prev, block)) {
+      if (/[-‐‑–]$/.test(prev.text)) {
+        prev.text = prev.text.slice(0, -1) + block.text;           // palabra partida
+      } else {
+        prev.text = `${prev.text} ${block.text}`;
+      }
+      prev.chars += block.chars;
+      continue;
+    }
+    out.push({ ...block });
+  }
+  return out;
+}
+
 function headingScore(text, avgSize, boldFrac, bodySize) {
   if (text.length < 2 || text.length > MAX_HEADING_CHARS) return 0;
   if (text.split(/\s+/).length > 14) return 0;
@@ -247,9 +281,11 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     if (count > bestCount) { bestCount = count; bodySize = size; }
   }
 
+  const blocks = joinContinuations(rawBlocks);
+
   const segments = [];
   const heuristicChapters = [];
-  for (const rb of rawBlocks) {
+  for (const rb of blocks) {
     const isHeading = headingScore(rb.text, rb.avgSize, rb.boldFrac, bodySize) >= HEADING_MIN_SCORE;
     if (isHeading) {
       heuristicChapters.push({ title: rb.text.slice(0, 80), seg: segments.length });

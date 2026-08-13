@@ -8,19 +8,22 @@ Lector de PDF con voces naturales, resaltado palabra a palabra estilo karaoke, c
 
 - Arrastra un PDF (o tócalo para elegirlo) y pulsa reproducir.
 - Todo se guarda **en tu dispositivo**: el documento procesado, tu progreso y tus ajustes. Nada se sube a ningún servidor.
+- **Toca cualquier oración** para que la lectura vuelva a ella. Las flechas saltan de párrafo en párrafo.
 - Toca el título del documento para saltar entre capítulos. Durante la lectura los controles se ocultan; un toque en un espacio vacío los muestra.
+- Los chips de **velocidad** y **tamaño** despliegan su control en la misma barra.
 - En iPhone/iPad: Compartir → **Añadir a pantalla de inicio** para instalarla como app.
 
 ## Voces
 
-- **Gemini** — las más naturales, iguales en todos los dispositivos. Requieren una clave gratuita de [Google AI Studio](https://aistudio.google.com/apikey), que se pega una vez en ⚙ Ajustes. La misma clave activa la traducción.
-- **Del dispositivo** — sin clave y sin conexión. En PC con Microsoft Edge son voces neuronales de alta calidad.
+Usa las voces integradas del dispositivo: ilimitadas, gratuitas y sin conexión. En PC con **Microsoft Edge** son voces neuronales de alta calidad; en iPhone/iPad son las de Apple, mejorables descargando voces en Ajustes → Accesibilidad → Contenido leído → Voces.
 
-El audio generado queda guardado en el dispositivo: releer no vuelve a consumir cuota.
+## Traducción
+
+El botón **Traducir** traduce únicamente la oración que estás escuchando, para que la cuota gratuita rinda. Necesita una clave gratuita de [Google AI Studio](https://aistudio.google.com/apikey), guardada solo en tu dispositivo.
 
 ## Privacidad
 
-El PDF se procesa dentro del navegador y nunca se sube. Solo viaja a Google el texto del párrafo que se está leyendo, para generar la voz o la traducción.
+El PDF se procesa dentro del navegador y nunca se sube. Solo viaja a Google el texto de la oración concreta que pidas traducir.
 
 ## Créditos
 

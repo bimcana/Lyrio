@@ -17,7 +17,7 @@
 </head>
 <body>
 
-  <!-- ============ HOME ============ -->
+  <!-- ============ INICIO ============ -->
   <div id="home" class="view">
     <header class="brand">
       <h1>Lyrio</h1>
@@ -39,7 +39,7 @@
     </section>
   </div>
 
-  <!-- ============ READER ============ -->
+  <!-- ============ LECTOR ============ -->
   <div id="reader" class="view hidden">
     <header id="rtop">
       <button id="btnBack" class="icon-btn" aria-label="Volver a la biblioteca">
@@ -58,12 +58,26 @@
 
     <footer id="dock">
       <div id="progress"><div id="progressFill"></div></div>
+
+      <div id="popSpeed" class="popover hidden">
+        <div class="pop-head"><span>Velocidad</span><span id="speedOut" class="pop-value"></span></div>
+        <input id="speedRange" type="range" min="0.5" max="1.5" step="0.05" value="1">
+        <div class="slider-marks"><span>0.5×</span><span>1×</span><span>1.5×</span></div>
+      </div>
+
+      <div id="popSize" class="popover hidden">
+        <div class="pop-head"><span>Tamaño del texto</span><span id="sizeOut" class="pop-value"></span></div>
+        <input id="sizeRange" type="range" min="18" max="44" step="1" value="26">
+        <div class="slider-marks"><span>A</span><span class="mark-big">A</span></div>
+      </div>
+
       <div id="chips">
         <button id="chipVoice" class="chip" aria-label="Cambiar voz"></button>
-        <button id="chipSpeed" class="chip" aria-label="Cambiar velocidad"></button>
-        <button id="chipFont" class="chip" aria-label="Tipografía">Aa</button>
-        <button id="chipTranslate" class="chip" aria-label="Traducción">Traducir</button>
+        <button id="chipSpeed" class="chip" aria-label="Velocidad"></button>
+        <button id="chipFont" class="chip" aria-label="Tamaño del texto">Aa</button>
+        <button id="chipTranslate" class="chip" aria-label="Traducir la oración actual">Traducir</button>
       </div>
+
       <div id="transport">
         <button id="btnPrev" class="icon-btn big" aria-label="Párrafo anterior">
           <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M6 6h2v12H6zM9.5 12 18 6v12z"/></svg>
@@ -71,7 +85,6 @@
         <button id="btnPlay" class="play-btn" aria-label="Reproducir">
           <svg id="iconPlay" viewBox="0 0 24 24" width="30" height="30" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <svg id="iconPause" class="hidden" viewBox="0 0 24 24" width="30" height="30" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
-          <svg id="iconSpin" class="hidden spin" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>
         </button>
         <button id="btnNext" class="icon-btn big" aria-label="Párrafo siguiente">
           <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
@@ -80,7 +93,7 @@
     </footer>
   </div>
 
-  <!-- ============ SETTINGS SHEET ============ -->
+  <!-- ============ AJUSTES ============ -->
   <div id="sheetBackdrop" class="hidden"></div>
   <div id="sheet" class="hidden" role="dialog" aria-label="Ajustes">
     <div class="sheet-handle"></div>
@@ -88,16 +101,8 @@
     <section id="secVoice">
       <h3>Voz</h3>
       <p class="hint" id="voiceHint"></p>
-      <div class="voice-group"><h4>Este dispositivo · Español</h4><div id="devVoicesEs" class="voice-list"></div></div>
-      <div class="voice-group"><h4>Este dispositivo · English</h4><div id="devVoicesEn" class="voice-list"></div></div>
-      <div class="voice-group"><h4>Gemini · español (cuota diaria limitada)</h4><div id="gemVoicesEs" class="voice-list"></div></div>
-      <div class="voice-group"><h4>Gemini · inglés (cuota diaria limitada)</h4><div id="gemVoicesEn" class="voice-list"></div></div>
-    </section>
-
-    <section id="secSpeed">
-      <h3>Velocidad <span id="speedValue" class="sec-value"></span></h3>
-      <input id="speedSlider" type="range" min="0.5" max="2" step="0.05" value="1">
-      <div class="slider-marks"><span>0.5×</span><span>1×</span><span>1.5×</span><span>2×</span></div>
+      <div class="voice-group"><h4>Español</h4><div id="devVoicesEs" class="voice-list"></div></div>
+      <div class="voice-group"><h4>English</h4><div id="devVoicesEn" class="voice-list"></div></div>
     </section>
 
     <section id="secReading">
@@ -108,8 +113,6 @@
         <button data-font="round" class="chip">Redonda</button>
         <button data-font="legible" class="chip">Legible</button>
       </div>
-      <h4>Tamaño <span id="sizeValue" class="sec-value"></span></h4>
-      <input id="sizeSlider" type="range" min="18" max="40" step="1" value="26">
       <h4>Ancho de columna</h4>
       <div class="chip-row" id="widthChips">
         <button data-width="angosto" class="chip">Angosto</button>
@@ -125,8 +128,8 @@
     </section>
 
     <section id="secTranslate">
-      <h3>Clave de Google AI Studio</h3>
-      <p class="hint">Activa las <strong>voces Gemini</strong> y la <strong>traducción</strong> ES ↔ EN bajo cada párrafo, ideal para practicar idiomas. Consigue tu clave gratis en <strong>aistudio.google.com/apikey</strong>. Se guarda solo en este dispositivo.</p>
+      <h3>Traducción</h3>
+      <p class="hint">El botón <strong>Traducir</strong> traduce solo la oración que estás escuchando, así la cuota gratuita rinde. Consigue tu clave gratis en <strong>aistudio.google.com/apikey</strong>; se guarda solo en este dispositivo.</p>
       <div class="key-row">
         <input id="geminiKey" type="password" placeholder="API key de Google AI Studio" autocomplete="off">
         <button id="saveKey" class="chip">Guardar</button>
