@@ -1,14 +1,14 @@
-/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, voces
+﻿/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, voces
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=7";
-import { splitSentences } from "./sentences.js?v=7";
+import { extractFromPdf } from "./extract.js?v=8";
+import { splitSentences } from "./sentences.js?v=8";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=7";
+} from "./storage.js?v=8";
 
 const $ = (id) => document.getElementById(id);
 
@@ -332,10 +332,9 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
     segs[k].classList.toggle("current", k === para);
     segs[k].classList.toggle("near", Math.abs(k - para) === 1);
   }
-  if (scroll && Date.now() - state.userScrolledAt > 4000) {
-    const objetivo = segEl(para)?.querySelector(".sn.active") || segEl(para);
-    objetivo?.scrollIntoView({ block: "center", behavior: instant ? "auto" : "smooth" });
-  }
+  // El desplazamiento se decide aquí, al cambiar de oración: nunca en mitad
+  // de una, para no mover el texto mientras la voz la está leyendo.
+  if (scroll) mantenerALaVista({ instant, parrafoNuevo: antes !== para });
 
   const total = state.doc.segments.length;
   $("progressFill").style.width = total > 1 ? `${(para / (total - 1)) * 100}%` : "100%";
@@ -343,9 +342,33 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
   schedulePositionSave();
 }
 
+/* Coloca la oración en curso a un cuarto de pantalla desde arriba, dejando
+   tres cuartos por delante para que los párrafos largos no se salgan. */
+const ANCLA = 0.25;
+const UMBRAL = 0.66;
+
+function mantenerALaVista({ instant = false, parrafoNuevo = false } = {}) {
+  const modo = state.settings.scrollMode || "auto";
+  if (modo === "manual") return;
+  if (modo === "parrafo" && !parrafoNuevo) return;
+  if (!instant && Date.now() - state.userScrolledAt < 4000) return;
+
+  const stage = $("stage");
+  const el = segEl(state.para)?.querySelector(".sn.active") || segEl(state.para);
+  if (!el) return;
+
+  const zona = stage.getBoundingClientRect();
+  const linea = el.getBoundingClientRect();
+  const posicion = (linea.top - zona.top) / zona.height;
+  if (modo === "auto" && posicion >= 0 && posicion < UMBRAL) return;   // aún bien visible
+
+  const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ANCLA;
+  stage.scrollTo({ top: Math.max(0, destino), behavior: instant ? "auto" : "smooth" });
+}
+
 /* Marca la oración en curso sin volver a dibujar el párrafo entero. */
-function markSentence(k) {
-  if (k === state.sent) return;
+function markSentence(k, { force = false } = {}) {
+  if (!force && k === state.sent) return;
   state.sent = k;
   const el = segEl(state.para);
   if (!el) return;
@@ -358,6 +381,9 @@ function markSentence(k) {
     el.querySelector(".trans")?.remove();
     updateChips();
   }
+  // Momento exacto en que termina una oración y empieza la siguiente:
+  // es el único punto donde se permite mover el texto.
+  mantenerALaVista();
 }
 
 /* ---------- motor neuronal: un audio por párrafo ---------- */
@@ -599,8 +625,9 @@ function goToSentence(para, sent) {
   state.translation = null;
 
   if (usaNeural() && mismoParrafo && state.timings.length) {
-    setCurrent(para, sent, { redraw: false });
-    markSentence(sent);
+    // markSentence se encarga del desplazamiento, ya con las clases puestas.
+    setCurrent(para, sent, { redraw: false, scroll: false });
+    markSentence(sent, { force: true });
     state.audio.currentTime = timeOfSentence(sent);
     state.litIdx = -1;
     if (sonando) { state.token++; state.playing = true; state.audio.play().catch(() => {}); startSync(); }
@@ -950,11 +977,22 @@ function renderThemes() {
   }
 }
 
+const SCROLL_HINTS = {
+  auto: "El texto solo sube cuando la oración en curso pasa de dos tercios de la pantalla, y entonces queda a un cuarto desde arriba.",
+  siempre: "Cada oración se coloca a un cuarto desde arriba, como un teleprompter.",
+  parrafo: "El texto solo se mueve al empezar un párrafo nuevo.",
+  manual: "El texto nunca se mueve solo; lo desplazas tú.",
+};
+
 function highlightChipRows() {
   $("fontChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.font === state.settings.font));
   $("widthChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.width === (state.settings.width || "medio")));
+  const modo = state.settings.scrollMode || "auto";
+  $("scrollChips").querySelectorAll(".chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.scroll === modo));
+  $("scrollHint").textContent = SCROLL_HINTS[modo] || "";
 }
 
 function openSheet() {
@@ -1067,6 +1105,10 @@ function wireEvents() {
   $("widthChips").addEventListener("click", (e) => {
     const width = e.target.closest(".chip")?.dataset.width;
     if (width) { saveSettings({ width }); highlightChipRows(); }
+  });
+  $("scrollChips").addEventListener("click", (e) => {
+    const scrollMode = e.target.closest(".chip")?.dataset.scroll;
+    if (scrollMode) { saveSettings({ scrollMode }); highlightChipRows(); }
   });
 
   $("saveEngine").addEventListener("click", async () => {

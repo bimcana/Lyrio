@@ -104,6 +104,7 @@ export const DEFAULT_SETTINGS = {
   fontSize: 26,
   theme: "kindle",
   width: "medio",
+  scrollMode: "auto",     // auto | siempre | parrafo | manual
 };
 
 /* subrayados por documento: { "parrafo:oracion": color } */
