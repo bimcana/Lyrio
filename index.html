@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="es" data-theme="dark" data-font="sans">
 <head>
   <meta charset="utf-8">
@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Nunito:wght@400;600&family=Atkinson+Hyperlegible:wght@400;700&display=swap">
-  <link rel="stylesheet" href="styles.css?v=5">
+  <link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 
@@ -85,6 +85,7 @@
         <button id="btnPlay" class="play-btn" aria-label="Reproducir">
           <svg id="iconPlay" viewBox="0 0 24 24" width="30" height="30" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <svg id="iconPause" class="hidden" viewBox="0 0 24 24" width="30" height="30" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          <svg id="iconSpin" class="hidden spin" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>
         </button>
         <button id="btnNext" class="icon-btn big" aria-label="Párrafo siguiente">
           <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z"/></svg>
@@ -101,8 +102,20 @@
     <section id="secVoice">
       <h3>Voz</h3>
       <p class="hint" id="voiceHint"></p>
-      <div class="voice-group"><h4>Español</h4><div id="devVoicesEs" class="voice-list"></div></div>
-      <div class="voice-group"><h4>English</h4><div id="devVoicesEn" class="voice-list"></div></div>
+      <div class="voice-group"><h4>Microsoft · Español</h4><div id="neuralVoicesEs" class="voice-list"></div></div>
+      <div class="voice-group"><h4>Microsoft · English</h4><div id="neuralVoicesEn" class="voice-list"></div></div>
+      <div class="voice-group"><h4>Este dispositivo · Español</h4><div id="devVoicesEs" class="voice-list"></div></div>
+      <div class="voice-group"><h4>Este dispositivo · English</h4><div id="devVoicesEn" class="voice-list"></div></div>
+    </section>
+
+    <section id="secEngine">
+      <h3>Motor de voz</h3>
+      <p class="hint">Dirección del servicio que genera las voces de Microsoft. Se configura una sola vez por dispositivo. Si lleva un rato sin usarse, la primera lectura tarda unos segundos en despertarlo.</p>
+      <div class="key-row">
+        <input id="engineUrl" type="url" placeholder="https://lyrio-voz.onrender.com" autocomplete="off">
+        <button id="saveEngine" class="chip">Guardar</button>
+      </div>
+      <p id="engineStatus" class="hint"></p>
     </section>
 
     <section id="secReading">
@@ -148,6 +161,6 @@
 
   <div id="toast" class="hidden"></div>
   <!-- ?v= evita que un navegador mezcle el HTML nuevo con scripts viejos en caché -->
-  <script type="module" src="app.js?v=5"></script>
+  <script type="module" src="app.js?v=6"></script>
 </body>
 </html>

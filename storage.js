@@ -93,6 +93,8 @@ export async function cacheTranslation(target, text, translation) {
 const SETTINGS_KEY = "lyrio-settings";
 
 export const DEFAULT_SETTINGS = {
+  // Motor de voces neuronales de Microsoft; se puede cambiar en Ajustes.
+  engine_url: "https://lyrio-voz.onrender.com",
   gemini_api_key: "",
   gemini_model: "",
   voice_es: "",          // se elige sola la mejor voz del dispositivo

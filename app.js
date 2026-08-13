@@ -1,14 +1,14 @@
-/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, lectura por
+﻿/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, lectura por
    oraciones con las voces del propio dispositivo y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=5";
-import { splitSentences } from "./sentences.js?v=5";
+import { extractFromPdf } from "./extract.js?v=6";
+import { splitSentences } from "./sentences.js?v=6";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation,
-} from "./storage.js?v=5";
+} from "./storage.js?v=6";
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,6 +17,34 @@ const UNAVAILABLE_HINTS = ["not available", "not found", "deprecated", "does not
 const geminiBadModels = new Set();
 
 const MAX_SPEED = 1.5;
+
+/* ---------- voces neuronales de Microsoft (motor remoto) ---------- */
+
+const NEURAL_VOICES = [
+  { id: "es-MX-DaliaNeural", name: "Dalia", region: "México", gender: "F", lang: "es" },
+  { id: "es-MX-JorgeNeural", name: "Jorge", region: "México", gender: "M", lang: "es" },
+  { id: "es-US-PalomaNeural", name: "Paloma", region: "Latino EE.UU.", gender: "F", lang: "es" },
+  { id: "es-US-AlonsoNeural", name: "Alonso", region: "Latino EE.UU.", gender: "M", lang: "es" },
+  { id: "es-DO-RamonaNeural", name: "Ramona", region: "Rep. Dominicana", gender: "F", lang: "es" },
+  { id: "es-DO-EmilioNeural", name: "Emilio", region: "Rep. Dominicana", gender: "M", lang: "es" },
+  { id: "es-CO-SalomeNeural", name: "Salomé", region: "Colombia", gender: "F", lang: "es" },
+  { id: "es-CO-GonzaloNeural", name: "Gonzalo", region: "Colombia", gender: "M", lang: "es" },
+  { id: "es-AR-ElenaNeural", name: "Elena", region: "Argentina", gender: "F", lang: "es" },
+  { id: "es-AR-TomasNeural", name: "Tomás", region: "Argentina", gender: "M", lang: "es" },
+  { id: "en-US-AvaMultilingualNeural", name: "Ava", region: "US · Multilingual", gender: "F", lang: "en" },
+  { id: "en-US-AndrewMultilingualNeural", name: "Andrew", region: "US · Multilingual", gender: "M", lang: "en" },
+  { id: "en-US-EmmaMultilingualNeural", name: "Emma", region: "US · Multilingual", gender: "F", lang: "en" },
+  { id: "en-US-BrianMultilingualNeural", name: "Brian", region: "US · Multilingual", gender: "M", lang: "en" },
+  { id: "en-US-JennyNeural", name: "Jenny", region: "US", gender: "F", lang: "en" },
+  { id: "en-US-GuyNeural", name: "Guy", region: "US", gender: "M", lang: "en" },
+  { id: "en-US-AriaNeural", name: "Aria", region: "US", gender: "F", lang: "en" },
+  { id: "en-US-ChristopherNeural", name: "Christopher", region: "US", gender: "M", lang: "en" },
+];
+
+const isNeural = (id) => NEURAL_VOICES.some((v) => v.id === id);
+const neuralById = (id) => NEURAL_VOICES.find((v) => v.id === id);
+
+const engineUrl = () => (state.settings.engine_url || "").trim().replace(/\/+$/, "");
 
 /* ---------- estado ---------- */
 
@@ -33,7 +61,14 @@ const state = {
   userScrolledAt: 0,
   wakeLock: null,
   token: 0,             // invalida cadenas de reproducción antiguas
+  engine: "device",     // "device" (voz del sistema) | "neural" (motor remoto)
+  audio: new Audio(),   // reproduce el audio del motor neuronal
+  clips: new Map(),     // "para|sent|voz|vel" -> Promise<{url, words}>
+  raf: 0,
 };
+
+state.audio.setAttribute("playsinline", "");
+state.audio.preload = "auto";
 
 /* ---------- avisos ---------- */
 
@@ -85,10 +120,17 @@ function bestVoiceFor(lang) {
 
 function autoPickVoices() {
   const patch = {};
+  const tieneMotor = Boolean(engineUrl());
   for (const [lang, field] of [["es", "voice_es"], ["en", "voice_en"]]) {
-    if (voiceByRef(state.settings[field])) continue;              // la guardada existe aquí
-    const v = bestVoiceFor(lang);
-    if (v) patch[field] = "device:" + v.voiceURI;
+    const actual = state.settings[field];
+    if (isNeural(actual) && tieneMotor) continue;                 // voz neuronal utilizable
+    if (voiceByRef(actual)) continue;                             // voz del sistema disponible
+    if (tieneMotor) {
+      patch[field] = lang === "es" ? "es-MX-DaliaNeural" : "en-US-AvaMultilingualNeural";
+    } else {
+      const v = bestVoiceFor(lang);
+      if (v) patch[field] = "device:" + v.voiceURI;
+    }
   }
   if (Object.keys(patch).length) saveSettings(patch);
 }
@@ -328,8 +370,10 @@ let estimator = 0;
 function stopSpeech() {
   clearInterval(keepAlive);
   clearInterval(estimator);
+  cancelAnimationFrame(state.raf);
   state.playing = false;
   state.token++;
+  state.audio.pause();
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   setPlayUI("paused");
   setImmersive(false);
@@ -352,11 +396,137 @@ function markLitByChar(absChar) {
   state.litIdx = lit;
 }
 
+/* ---------- motor neuronal: pide el audio y lo reproduce con tiempos reales ---------- */
+
+const clipKey = (p, k) => `${p}|${k}|${voiceForPara(p)}|${state.settings.speed}`;
+
+function fetchClip(p, k) {
+  const key = clipKey(p, k);
+  if (state.clips.has(key)) return state.clips.get(key);
+  const base = engineUrl();
+  const promise = fetch(`${base}/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: sentenceText(p, k),
+      voice: voiceForPara(p),
+      speed: Math.min(MAX_SPEED, state.settings.speed),
+    }),
+  }).then(async (res) => {
+    if (!res.ok) {
+      let msg = `Motor de voz: error ${res.status}`;
+      try { msg = (await res.json()).detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
+    return { url: URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })), words: data.words };
+  }).catch((err) => {
+    if (err instanceof TypeError) throw new Error("No se pudo contactar el motor de voz (¿hay internet?)");
+    throw err;
+  });
+  promise.catch(() => state.clips.delete(key));
+  state.clips.set(key, promise);
+  while (state.clips.size > 20) {
+    const viejo = state.clips.keys().next().value;
+    const p2 = state.clips.get(viejo);
+    state.clips.delete(viejo);
+    p2.then((r) => URL.revokeObjectURL(r.url)).catch(() => {});
+  }
+  return promise;
+}
+
+/* Adelanta las siguientes oraciones para que la lectura no se corte. */
+function prefetchClips(p, k) {
+  if (!state.doc || state.engine !== "neural") return;
+  let para = p, sent = k, hechos = 0;
+  while (hechos < 3) {
+    const sents = sentencesFor(para);
+    if (sent + 1 < sents.length) sent++;
+    else if (para + 1 < state.doc.segments.length) { para++; sent = 0; }
+    else break;
+    fetchClip(para, sent).catch(() => {});
+    hechos++;
+  }
+}
+
+function syncNeuralWords(words) {
+  const t = state.audio.currentTime * 1000;
+  let lit = -1;
+  for (let i = 0; i < words.length; i++) {
+    if (t >= words[i].s) lit = i; else break;
+  }
+  if (lit === state.litIdx) return;
+  for (let i = 0; i < state.words.length; i++) {
+    const el = state.words[i].el;
+    el.classList.toggle("sung", i < lit);
+    el.classList.toggle("lit", i === lit);
+    if (i === lit) el.classList.add("sung");
+  }
+  state.litIdx = lit;
+}
+
+async function speakNeural(token) {
+  const p = state.para, k = state.sent;
+  try {
+    const { url, words } = await fetchClip(p, k);
+    if (token !== state.token) return;
+    state.audio.src = url;
+    state.audio.playbackRate = 1;
+    await state.audio.play();
+    if (token !== state.token) { state.audio.pause(); return; }
+    state.playing = true;
+    state.engine = "neural";
+    setPlayUI("playing");
+    setImmersive(true);
+    requestWakeLock();
+    prefetchClips(p, k);
+
+    cancelAnimationFrame(state.raf);
+    const tick = () => {
+      if (token !== state.token) return;
+      syncNeuralWords(words);
+      state.raf = requestAnimationFrame(tick);
+    };
+    state.raf = requestAnimationFrame(tick);
+  } catch (err) {
+    if (token !== state.token) return;
+    // Si el motor falla, la lectura continúa con la voz del dispositivo.
+    const v = bestVoiceFor(paraLang(p));
+    if (v) {
+      saveSettings(paraLang(p) === "es" ? { voice_es: "device:" + v.voiceURI }
+                                        : { voice_en: "device:" + v.voiceURI });
+      updateChips();
+      toast("Motor de voz no disponible: seguimos con la voz del dispositivo.");
+      speakCurrent();
+      return;
+    }
+    state.playing = false;
+    setPlayUI("paused");
+    toast(err.message || "No se pudo reproducir", true);
+  }
+}
+
+state.audio.addEventListener("ended", () => {
+  if (state.playing && state.engine === "neural") advance();
+});
+
 function speakCurrent() {
   if (!state.doc) return;
+
+  if (isNeural(voiceForPara(state.para)) && engineUrl()) {
+    const token = ++state.token;
+    window.speechSynthesis?.cancel();
+    setPlayUI("loading");
+    speakNeural(token);
+    return;
+  }
+
   if (!("speechSynthesis" in window)) { toast("Este navegador no tiene voces integradas", true); return; }
 
   const token = ++state.token;
+  state.engine = "device";
+  state.audio.pause();
   const sents = sentencesFor(state.para);
   const s = sents[state.sent];
   const text = sentenceText(state.para, state.sent);
@@ -443,6 +613,8 @@ function goTo(para, sent, { keepPlaying = true } = {}) {
   const wasPlaying = state.playing;
   state.token++;
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  state.audio.pause();
+  cancelAnimationFrame(state.raf);
   clearInterval(estimator);
   state.translation = null;
   setCurrent(para, sent);
@@ -453,8 +625,9 @@ function goTo(para, sent, { keepPlaying = true } = {}) {
 const goToPara = (i) => goTo(Math.max(0, Math.min(state.doc.segments.length - 1, i)), 0);
 
 function setPlayUI(mode) {
-  $("iconPlay").classList.toggle("hidden", mode === "playing");
+  $("iconPlay").classList.toggle("hidden", mode !== "paused");
   $("iconPause").classList.toggle("hidden", mode !== "playing");
+  $("iconSpin").classList.toggle("hidden", mode !== "loading");
   $("btnPlay").setAttribute("aria-label", mode === "playing" ? "Pausa" : "Reproducir");
 }
 
@@ -609,6 +782,8 @@ function openChapters() {
 /* ---------- chips y desplegables ---------- */
 
 function voiceLabel(id) {
+  const n = neuralById(id);
+  if (n) return `${n.name} · ${n.gender === "F" ? "♀" : "♂"}`;
   const v = voiceByRef(id);
   return v ? shortVoiceName(v.name) : "Voz";
 }
@@ -644,11 +819,36 @@ function togglePopover(which) {
   chip.classList.add("open");
 }
 
+function selectVoice(lang, id) {
+  saveSettings(lang === "es" ? { voice_es: id } : { voice_en: id });
+  state.clips.clear();
+  renderVoiceLists();
+  updateChips();
+  if (state.playing) { state.token++; speakCurrent(); }
+}
+
 function renderVoiceLists() {
   refreshDeviceVoices();
-  $("voiceHint").textContent = deviceVoices.length
-    ? "Voces integradas de este dispositivo: ilimitadas y sin conexión. En PC con Microsoft Edge son voces neuronales."
-    : "Este navegador no expone voces de sistema.";
+  const motor = Boolean(engineUrl());
+  $("voiceHint").textContent = motor
+    ? "Voces neuronales de Microsoft: iguales en todos tus dispositivos, sin límite, con resaltado exacto."
+    : "Configura el motor de voz más abajo para usar las voces neuronales de Microsoft en cualquier dispositivo.";
+
+  for (const [lang, containerId] of [["es", "neuralVoicesEs"], ["en", "neuralVoicesEn"]]) {
+    const wrap = $(containerId);
+    wrap.innerHTML = "";
+    for (const v of NEURAL_VOICES.filter((x) => x.lang === lang)) {
+      const activa = (lang === "es" ? state.settings.voice_es : state.settings.voice_en) === v.id;
+      const btn = document.createElement("button");
+      btn.className = "voice-item" + (activa ? " active" : "") + (motor ? "" : " disabled");
+      btn.innerHTML = `<span class="vg">${v.gender === "F" ? "♀" : "♂"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
+      btn.querySelector(".vn").textContent = v.name;
+      btn.querySelector(".vr").textContent = v.region;
+      if (motor) btn.addEventListener("click", () => selectVoice(lang, v.id));
+      wrap.appendChild(btn);
+    }
+  }
+
   for (const [lang, containerId] of [["es", "devVoicesEs"], ["en", "devVoicesEn"]]) {
     const wrap = $(containerId);
     wrap.innerHTML = "";
@@ -663,12 +863,7 @@ function renderVoiceLists() {
       btn.innerHTML = `<span class="vg">${neural ? "★" : "♪"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
       btn.querySelector(".vn").textContent = shortVoiceName(v.name);
       btn.querySelector(".vr").textContent = v.lang + (neural ? " · Neural" : "");
-      btn.addEventListener("click", () => {
-        saveSettings(lang === "es" ? { voice_es: id } : { voice_en: id });
-        renderVoiceLists();
-        updateChips();
-        if (state.playing) { state.token++; speakCurrent(); }
-      });
+      btn.addEventListener("click", () => selectVoice(lang, id));
       wrap.appendChild(btn);
     }
   }
@@ -676,6 +871,8 @@ function renderVoiceLists() {
 
 function openSheet() {
   renderVoiceLists();
+  $("engineUrl").value = state.settings.engine_url || "";
+  $("engineStatus").textContent = engineUrl() ? "✓ Motor configurado" : "";
   $("geminiKey").value = state.settings.gemini_api_key || "";
   $("keyStatus").textContent = state.settings.gemini_api_key ? "✓ Clave configurada" : "";
   highlightChipRows();
@@ -763,6 +960,27 @@ function wireEvents() {
   $("widthChips").addEventListener("click", (e) => {
     const width = e.target.closest(".chip")?.dataset.width;
     if (width) { saveSettings({ width }); highlightChipRows(); }
+  });
+  $("saveEngine").addEventListener("click", async () => {
+    const url = $("engineUrl").value.trim().replace(/\/+$/, "");
+    saveSettings({ engine_url: url });
+    state.clips.clear();
+    if (!url) {
+      autoPickVoices(); renderVoiceLists(); updateChips();
+      $("engineStatus").textContent = "Sin motor: se usan las voces del dispositivo.";
+      return;
+    }
+    $("engineStatus").textContent = "Comprobando… (puede tardar si estaba dormido)";
+    try {
+      const res = await fetch(url + "/", { method: "GET" });
+      const ok = res.ok && (await res.json()).service === "lyrio-voice";
+      $("engineStatus").textContent = ok
+        ? "✓ Motor conectado — ya puedes elegir voces de Microsoft"
+        : "⚠ Responde, pero no parece el motor de Lyrio";
+      if (ok) { autoPickVoices(); renderVoiceLists(); updateChips(); }
+    } catch {
+      $("engineStatus").textContent = "⚠ No se pudo conectar con esa dirección";
+    }
   });
   $("saveKey").addEventListener("click", () => {
     const key = $("geminiKey").value.trim();
