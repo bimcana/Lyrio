@@ -1,0 +1,54 @@
+name: Prueba de voces Microsoft
+on:
+  push:
+    paths:
+      - ".github/workflows/test-voces.yml"
+permissions:
+  contents: write
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar edge-tts
+        run: pip install --quiet edge-tts
+      - name: Sintetizar con voces de Microsoft
+        run: |
+          python - <<'EOF'
+          import asyncio, json, traceback
+          import edge_tts
+
+          async def probar(texto, voz):
+              try:
+                  com = edge_tts.Communicate(texto, voz, boundary="WordBoundary")
+                  audio = 0
+                  palabras = 0
+                  async for ch in com.stream():
+                      if ch["type"] == "audio":
+                          audio += len(ch["data"])
+                      elif ch["type"] == "WordBoundary":
+                          palabras += 1
+                  return {"voz": voz, "ok": audio > 0, "audio_bytes": audio, "palabras": palabras}
+              except Exception as e:
+                  return {"voz": voz, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+          async def main():
+              r1 = await probar("Hola, esta es una prueba de las voces de Microsoft desde los servidores de GitHub.", "es-DO-RamonaNeural")
+              r2 = await probar("Testing Microsoft neural voices from GitHub runners.", "en-US-AvaMultilingualNeural")
+              resultado = {"donde": "github-actions (Azure)", "es": r1, "en": r2}
+              with open("test-voces-resultado.json", "w", encoding="utf-8") as f:
+                  json.dump(resultado, f, ensure_ascii=False, indent=1)
+              print(json.dumps(resultado, ensure_ascii=False, indent=1))
+
+          asyncio.run(main())
+          EOF
+      - name: Publicar resultado
+        run: |
+          git config user.name "lyrio-bot"
+          git config user.email "actions@github.com"
+          git add test-voces-resultado.json
+          git commit -m "Resultado de la prueba de voces [skip ci]" || echo "sin cambios"
+          git push
