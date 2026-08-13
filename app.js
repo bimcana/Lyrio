@@ -1,14 +1,14 @@
-﻿/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, lectura por
-   oraciones con las voces del propio dispositivo y resaltado palabra a palabra. */
+/* Lyrio Web — lector autosuficiente: biblioteca en el dispositivo, voces
+   neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=6";
-import { splitSentences } from "./sentences.js?v=6";
+import { extractFromPdf } from "./extract.js?v=7";
+import { splitSentences } from "./sentences.js?v=7";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
-  getCachedTranslation, cacheTranslation,
-} from "./storage.js?v=6";
+  getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
+} from "./storage.js?v=7";
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,54 +17,53 @@ const UNAVAILABLE_HINTS = ["not available", "not found", "deprecated", "does not
 const geminiBadModels = new Set();
 
 const MAX_SPEED = 1.5;
+const LONG_PRESS_MS = 480;
 
-/* ---------- voces neuronales de Microsoft (motor remoto) ---------- */
-
-const NEURAL_VOICES = [
-  { id: "es-MX-DaliaNeural", name: "Dalia", region: "México", gender: "F", lang: "es" },
-  { id: "es-MX-JorgeNeural", name: "Jorge", region: "México", gender: "M", lang: "es" },
-  { id: "es-US-PalomaNeural", name: "Paloma", region: "Latino EE.UU.", gender: "F", lang: "es" },
-  { id: "es-US-AlonsoNeural", name: "Alonso", region: "Latino EE.UU.", gender: "M", lang: "es" },
-  { id: "es-DO-RamonaNeural", name: "Ramona", region: "Rep. Dominicana", gender: "F", lang: "es" },
-  { id: "es-DO-EmilioNeural", name: "Emilio", region: "Rep. Dominicana", gender: "M", lang: "es" },
-  { id: "es-CO-SalomeNeural", name: "Salomé", region: "Colombia", gender: "F", lang: "es" },
-  { id: "es-CO-GonzaloNeural", name: "Gonzalo", region: "Colombia", gender: "M", lang: "es" },
-  { id: "es-AR-ElenaNeural", name: "Elena", region: "Argentina", gender: "F", lang: "es" },
-  { id: "es-AR-TomasNeural", name: "Tomás", region: "Argentina", gender: "M", lang: "es" },
-  { id: "en-US-AvaMultilingualNeural", name: "Ava", region: "US · Multilingual", gender: "F", lang: "en" },
-  { id: "en-US-AndrewMultilingualNeural", name: "Andrew", region: "US · Multilingual", gender: "M", lang: "en" },
-  { id: "en-US-EmmaMultilingualNeural", name: "Emma", region: "US · Multilingual", gender: "F", lang: "en" },
-  { id: "en-US-BrianMultilingualNeural", name: "Brian", region: "US · Multilingual", gender: "M", lang: "en" },
-  { id: "en-US-JennyNeural", name: "Jenny", region: "US", gender: "F", lang: "en" },
-  { id: "en-US-GuyNeural", name: "Guy", region: "US", gender: "M", lang: "en" },
-  { id: "en-US-AriaNeural", name: "Aria", region: "US", gender: "F", lang: "en" },
-  { id: "en-US-ChristopherNeural", name: "Christopher", region: "US", gender: "M", lang: "en" },
+const TEMAS = [
+  { id: "kindle", name: "Kindle", bg: "#000000", fg: "#FFFFFF" },
+  { id: "noche", name: "Noche", bg: "#16181C", fg: "#F2F5F9" },
+  { id: "carbon", name: "Carbón", bg: "#1A1714", fg: "#F7F1E8" },
+  { id: "dark", name: "Lyrio", bg: "#12101A", fg: "#F5F2FF" },
+  { id: "sepia", name: "Sepia", bg: "#F3E9D2", fg: "#3B3020" },
+  { id: "dia", name: "Día", bg: "#FBFAF7", fg: "#1F1D17" },
+  { id: "papel", name: "Papel", bg: "#FFFFFF", fg: "#10131A" },
 ];
 
-const isNeural = (id) => NEURAL_VOICES.some((v) => v.id === id);
-const neuralById = (id) => NEURAL_VOICES.find((v) => v.id === id);
-
-const engineUrl = () => (state.settings.engine_url || "").trim().replace(/\/+$/, "");
+/* Catálogo mínimo hasta que responda el motor con el completo. */
+const VOCES_BASE = [
+  { id: "es-MX-DaliaNeural", name: "Dalia", region: "México", gender: "F", lang: "es" },
+  { id: "es-MX-JorgeNeural", name: "Jorge", region: "México", gender: "M", lang: "es" },
+  { id: "es-DO-RamonaNeural", name: "Ramona", region: "Rep. Dominicana", gender: "F", lang: "es" },
+  { id: "es-DO-EmilioNeural", name: "Emilio", region: "Rep. Dominicana", gender: "M", lang: "es" },
+  { id: "en-US-AvaMultilingualNeural", name: "Ava", region: "EE.UU.", gender: "F", lang: "en" },
+  { id: "en-US-AndrewMultilingualNeural", name: "Andrew", region: "EE.UU.", gender: "M", lang: "en" },
+];
 
 /* ---------- estado ---------- */
 
 const state = {
   settings: loadSettings(),
   doc: null,
-  para: 0,              // párrafo actual
-  sent: 0,              // oración actual dentro del párrafo
-  sentences: new Map(), // índice de párrafo -> [{cs, ce}]
+  para: 0,
+  sent: 0,
+  sentences: new Map(),
+  highlights: {},
   playing: false,
-  words: [],            // {c, el} de la oración en curso
+  engine: "neural",       // "neural" (motor) | "device" (voz del sistema)
+  audio: new Audio(),
+  clips: new Map(),       // "parrafo|voz|velocidad" -> Promise<{url, words}>
+  words: [],              // {c, el} del párrafo en curso
+  timings: [],            // tiempos que devuelve el motor
   litIdx: -1,
-  translation: null,    // {para, sent, text}
+  translation: null,
+  voices: VOCES_BASE,
+  filterLang: "es",
+  filterRegion: "",
   userScrolledAt: 0,
   wakeLock: null,
-  token: 0,             // invalida cadenas de reproducción antiguas
-  engine: "device",     // "device" (voz del sistema) | "neural" (motor remoto)
-  audio: new Audio(),   // reproduce el audio del motor neuronal
-  clips: new Map(),     // "para|sent|voz|vel" -> Promise<{url, words}>
+  token: 0,
   raf: 0,
+  pick: null,             // oración con el menú de subrayado abierto
 };
 
 state.audio.setAttribute("playsinline", "");
@@ -82,65 +81,9 @@ function toast(msg, isError = false) {
   toastTimer = setTimeout(() => el.classList.add("hidden"), 4200);
 }
 
-/* ---------- voces del dispositivo ---------- */
-
-let deviceVoices = [];
-
-function refreshDeviceVoices() {
-  const all = (window.speechSynthesis?.getVoices() || [])
-    .filter((v) => /^(es|en)\b/i.test(v.lang) || /^(es|en)-/i.test(v.lang));
-  const rank = (v) => {
-    const n = v.name.toLowerCase();
-    if (/natural|online/.test(n)) return 0;                       // voces neuronales de Edge
-    if (/enhanced|premium|mejorad|superior/.test(n)) return 1;
-    if (/^es-(mx|us|do|co|ar|419|cl|pe|ve)/i.test(v.lang) || /^en-us/i.test(v.lang)) return 2;
-    return 3;
-  };
-  all.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
-  deviceVoices = all;
-}
-
-if ("speechSynthesis" in window) {
-  refreshDeviceVoices();
-  window.speechSynthesis.addEventListener?.("voiceschanged", () => {
-    refreshDeviceVoices();
-    autoPickVoices();
-    updateChips();
-  });
-}
-
-function voiceByRef(id) {
-  const uri = (id || "").replace(/^device:/, "");
-  return deviceVoices.find((v) => v.voiceURI === uri || v.name === uri) || null;
-}
-
-function bestVoiceFor(lang) {
-  return deviceVoices.filter((v) => v.lang.toLowerCase().startsWith(lang))[0] || null;
-}
-
-function autoPickVoices() {
-  const patch = {};
-  const tieneMotor = Boolean(engineUrl());
-  for (const [lang, field] of [["es", "voice_es"], ["en", "voice_en"]]) {
-    const actual = state.settings[field];
-    if (isNeural(actual) && tieneMotor) continue;                 // voz neuronal utilizable
-    if (voiceByRef(actual)) continue;                             // voz del sistema disponible
-    if (tieneMotor) {
-      patch[field] = lang === "es" ? "es-MX-DaliaNeural" : "en-US-AvaMultilingualNeural";
-    } else {
-      const v = bestVoiceFor(lang);
-      if (v) patch[field] = "device:" + v.voiceURI;
-    }
-  }
-  if (Object.keys(patch).length) saveSettings(patch);
-}
-
-function shortVoiceName(name) {
-  return name.replace(/^Microsoft\s+/i, "").replace(/^Google\s+/i, "")
-    .split(/\s+Online|\s*\(|\s*-\s/)[0].trim() || name;
-}
-
 /* ---------- ajustes ---------- */
+
+const engineUrl = () => (state.settings.engine_url || "").trim().replace(/\/+$/, "");
 
 function applyDisplaySettings() {
   const s = state.settings;
@@ -148,8 +91,10 @@ function applyDisplaySettings() {
   document.documentElement.dataset.font = s.font;
   document.documentElement.dataset.width = s.width || "medio";
   document.documentElement.style.setProperty("--reading-size", s.fontSize + "px");
+  // Del catálogo, no de getComputedStyle: durante la transición aún devuelve el color anterior.
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.body).backgroundColor;
+  const tema = TEMAS.find((t) => t.id === s.theme);
+  if (meta && tema) meta.content = tema.bg;
 }
 
 function saveSettings(patch) {
@@ -159,12 +104,42 @@ function saveSettings(patch) {
   persistSettings(state.settings);
 }
 
-function paraLang(i) {
-  return state.doc?.segments[i]?.lang || state.doc?.lang || "es";
-}
+const paraLang = (i) => state.doc?.segments[i]?.lang || state.doc?.lang || "es";
+const voiceForPara = (i) => (paraLang(i) === "en" ? state.settings.voice_en : state.settings.voice_es);
+const voiceById = (id) => state.voices.find((v) => v.id === id);
 
-function voiceForPara(i) {
-  return paraLang(i) === "en" ? state.settings.voice_en : state.settings.voice_es;
+/* ---------- voces del dispositivo (respaldo sin conexión) ---------- */
+
+let deviceVoices = [];
+function refreshDeviceVoices() {
+  deviceVoices = (window.speechSynthesis?.getVoices() || [])
+    .filter((v) => /^(es|en)[-_]/i.test(v.lang));
+}
+if ("speechSynthesis" in window) {
+  refreshDeviceVoices();
+  window.speechSynthesis.addEventListener?.("voiceschanged", refreshDeviceVoices);
+}
+const bestDeviceVoice = (lang) =>
+  deviceVoices.filter((v) => v.lang.toLowerCase().startsWith(lang))[0] || null;
+
+/* ---------- catálogo de voces del motor ---------- */
+
+async function loadVoiceCatalog() {
+  const base = engineUrl();
+  if (!base) return;
+  try {
+    const res = await fetch(`${base}/voices`);
+    const lista = await res.json();
+    if (Array.isArray(lista) && lista.length) {
+      state.voices = lista;
+      localStorage.setItem("lyrio-voces", JSON.stringify(lista));
+    }
+  } catch {
+    try {
+      const guardadas = JSON.parse(localStorage.getItem("lyrio-voces") || "null");
+      if (Array.isArray(guardadas) && guardadas.length) state.voices = guardadas;
+    } catch { /* sin catálogo: queda el mínimo */ }
+  }
 }
 
 /* ---------- oraciones ---------- */
@@ -175,11 +150,10 @@ function sentencesFor(i) {
   }
   return state.sentences.get(i);
 }
-
-function sentenceText(i, k) {
+const sentenceText = (i, k) => {
   const s = sentencesFor(i)[k];
   return state.doc.segments[i].text.slice(s.cs, s.ce);
-}
+};
 
 /* ---------- biblioteca ---------- */
 
@@ -216,22 +190,21 @@ async function uploadFile(file) {
   $("drop").classList.add("busy");
   $("drop").querySelector("strong").textContent = "Procesando…";
   try {
-    const buffer = await file.arrayBuffer();
-    const doc = await extractFromPdf(buffer, file.name);
+    const doc = await extractFromPdf(await file.arrayBuffer(), file.name);
     if (!doc.segments.length) {
       throw new Error("Este PDF no contiene texto seleccionable (probablemente es un escaneo). Aún no incluimos OCR.");
     }
     const library = await getLibrary();
-    const previous = library.find((d) => d.id === doc.id);
-    const position = previous ? previous.position || 0 : 0;
+    const previo = library.find((d) => d.id === doc.id);
+    const position = previo ? previo.position || 0 : 0;
     await saveDoc(doc);
-    const rest = library.filter((d) => d.id !== doc.id);
-    rest.unshift({
+    const resto = library.filter((d) => d.id !== doc.id);
+    resto.unshift({
       id: doc.id, title: doc.title, pages: doc.pages, lang: doc.lang,
       n_segments: doc.segments.length, added: Date.now(), position,
     });
-    await saveLibrary(rest);
-    enterReader(doc, position);
+    await saveLibrary(resto);
+    await enterReader(doc, position);
   } catch (err) {
     toast(err.message || "No se pudo procesar el PDF", true);
   } finally {
@@ -244,26 +217,29 @@ async function openDoc(id) {
   const doc = await getDoc(id).catch(() => null);
   if (!doc) { toast("Documento no encontrado en este dispositivo", true); return; }
   const entry = (await getLibrary()).find((d) => d.id === id);
-  enterReader(doc, entry?.position || 0);
+  await enterReader(doc, entry?.position || 0);
 }
 
 /* ---------- lector ---------- */
 
-function enterReader(doc, position) {
+async function enterReader(doc, position) {
   state.doc = doc;
   state.para = Math.min(position, doc.segments.length - 1);
   state.sent = 0;
   state.sentences.clear();
+  state.clips.clear();
   state.translation = null;
   state.words = [];
+  state.highlights = await getHighlights(doc.id).catch(() => ({}));
+
   $("home").classList.add("hidden");
   $("reader").classList.remove("hidden");
   setImmersive(false);
   closePopovers();
   $("docTitleText").textContent = doc.title;
-  const hasChapters = (doc.chapters || []).length > 0;
-  $("docTitleChev").classList.toggle("hidden", !hasChapters);
-  $("docTitle").classList.toggle("has-chapters", hasChapters);
+  const tieneCapitulos = (doc.chapters || []).length > 0;
+  $("docTitleChev").classList.toggle("hidden", !tieneCapitulos);
+  $("docTitle").classList.toggle("has-chapters", tieneCapitulos);
   $("endCap").classList.add("hidden");
 
   const wrap = $("segments");
@@ -277,37 +253,42 @@ function enterReader(doc, position) {
   }
   updateChips();
   setCurrent(state.para, 0, { instant: true });
+  updateMediaSession();
+  requestWakeLock();
 }
 
 function exitReader() {
-  stopSpeech();
+  stopPlayback();
   savePosition();
   state.doc = null;
   $("reader").classList.add("hidden");
   $("home").classList.remove("hidden");
+  releaseWakeLock();
   renderLibrary();
 }
 
 const segEl = (i) => $("segments").querySelector(`.seg[data-i="${i}"]`);
 
-/* Cada párrafo se dibuja como oraciones tocables; la que se lee además
-   lleva una palabra por span para el resaltado. */
 function renderParagraph(i) {
   const el = segEl(i);
   if (!el) return;
   const text = state.doc.segments[i].text;
   const sents = sentencesFor(i);
-  const isCurrentPara = i === state.para;
+  const esActual = i === state.para;
   const frag = document.createDocumentFragment();
 
   sents.forEach((s, k) => {
     const span = document.createElement("span");
     span.className = "sn";
     span.dataset.s = k;
+    const color = state.highlights[`${i}:${k}`];
+    if (color) span.dataset.hl = color;
     const sentText = text.slice(s.cs, s.ce);
 
-    if (isCurrentPara && k === state.sent) {
-      span.classList.add("active");
+    if (esActual && k === state.sent) span.classList.add("active");
+    if (esActual && k < state.sent) span.classList.add("done");
+
+    if (esActual) {
       let last = 0;
       for (const m of sentText.matchAll(/\S+/g)) {
         if (m.index > last) span.appendChild(document.createTextNode(sentText.slice(last, m.index)));
@@ -321,39 +302,39 @@ function renderParagraph(i) {
       if (last < sentText.length) span.appendChild(document.createTextNode(sentText.slice(last)));
     } else {
       span.textContent = sentText;
-      if (isCurrentPara && k < state.sent) span.classList.add("done");
     }
     frag.appendChild(span);
 
-    const gapEnd = k + 1 < sents.length ? sents[k + 1].cs : text.length;
-    if (gapEnd > s.ce) frag.appendChild(document.createTextNode(text.slice(s.ce, gapEnd)));
+    const finHueco = k + 1 < sents.length ? sents[k + 1].cs : text.length;
+    if (finHueco > s.ce) frag.appendChild(document.createTextNode(text.slice(s.ce, finHueco)));
   });
 
   el.innerHTML = "";
   el.appendChild(frag);
-  if (isCurrentPara) {
+  if (esActual) {
     state.words = [...el.querySelectorAll(".w")].map((w) => ({ c: Number(w.dataset.c), el: w }));
     state.litIdx = -1;
   }
   attachTranslation(el, i);
 }
 
-function setCurrent(para, sent, { instant = false, scroll = true } = {}) {
-  const prevPara = state.para;
+function setCurrent(para, sent, { instant = false, scroll = true, redraw = true } = {}) {
+  const antes = state.para;
   state.para = para;
   state.sent = sent;
-  if (prevPara !== para) renderParagraph(prevPara);
-  renderParagraph(para);
+  if (redraw) {
+    if (antes !== para) renderParagraph(antes);
+    renderParagraph(para);
+  }
 
   const segs = $("segments").children;
   for (let k = 0; k < segs.length; k++) {
     segs[k].classList.toggle("current", k === para);
     segs[k].classList.toggle("near", Math.abs(k - para) === 1);
   }
-
   if (scroll && Date.now() - state.userScrolledAt > 4000) {
-    const target = segEl(para)?.querySelector(".sn.active") || segEl(para);
-    target?.scrollIntoView({ block: "center", behavior: instant ? "auto" : "smooth" });
+    const objetivo = segEl(para)?.querySelector(".sn.active") || segEl(para);
+    objetivo?.scrollIntoView({ block: "center", behavior: instant ? "auto" : "smooth" });
   }
 
   const total = state.doc.segments.length;
@@ -362,54 +343,39 @@ function setCurrent(para, sent, { instant = false, scroll = true } = {}) {
   schedulePositionSave();
 }
 
-/* ---------- motor de voz del dispositivo ---------- */
-
-let keepAlive = 0;
-let estimator = 0;
-
-function stopSpeech() {
-  clearInterval(keepAlive);
-  clearInterval(estimator);
-  cancelAnimationFrame(state.raf);
-  state.playing = false;
-  state.token++;
-  state.audio.pause();
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  setPlayUI("paused");
-  setImmersive(false);
-  releaseWakeLock();
-  savePosition();
+/* Marca la oración en curso sin volver a dibujar el párrafo entero. */
+function markSentence(k) {
+  if (k === state.sent) return;
+  state.sent = k;
+  const el = segEl(state.para);
+  if (!el) return;
+  el.querySelectorAll(".sn").forEach((sn, idx) => {
+    sn.classList.toggle("active", idx === k);
+    sn.classList.toggle("done", idx < k);
+  });
+  if (state.translation && state.translation.para === state.para) {
+    state.translation = null;
+    el.querySelector(".trans")?.remove();
+    updateChips();
+  }
 }
 
-function markLitByChar(absChar) {
-  let lit = -1;
-  for (let k = 0; k < state.words.length; k++) {
-    if (state.words[k].c <= absChar) lit = k; else break;
-  }
-  if (lit === state.litIdx) return;
-  for (let k = 0; k < state.words.length; k++) {
-    const w = state.words[k].el;
-    w.classList.toggle("sung", k < lit);
-    w.classList.toggle("lit", k === lit);
-    if (k === lit) w.classList.add("sung");
-  }
-  state.litIdx = lit;
-}
+/* ---------- motor neuronal: un audio por párrafo ---------- */
 
-/* ---------- motor neuronal: pide el audio y lo reproduce con tiempos reales ---------- */
+const clipKey = (i) => `${i}|${voiceForPara(i)}|${state.settings.speed}`;
 
-const clipKey = (p, k) => `${p}|${k}|${voiceForPara(p)}|${state.settings.speed}`;
-
-function fetchClip(p, k) {
-  const key = clipKey(p, k);
+function fetchPara(i) {
+  const key = clipKey(i);
   if (state.clips.has(key)) return state.clips.get(key);
   const base = engineUrl();
+  if (!base) return Promise.reject(new Error("Configura el motor de voz en Ajustes."));
+
   const promise = fetch(`${base}/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      text: sentenceText(p, k),
-      voice: voiceForPara(p),
+      text: state.doc.segments[i].text,
+      voice: voiceForPara(i),
       speed: Math.min(MAX_SPEED, state.settings.speed),
     }),
   }).then(async (res) => {
@@ -425,54 +391,87 @@ function fetchClip(p, k) {
     if (err instanceof TypeError) throw new Error("No se pudo contactar el motor de voz (¿hay internet?)");
     throw err;
   });
+
   promise.catch(() => state.clips.delete(key));
   state.clips.set(key, promise);
-  while (state.clips.size > 20) {
+  while (state.clips.size > 8) {
     const viejo = state.clips.keys().next().value;
-    const p2 = state.clips.get(viejo);
+    const p = state.clips.get(viejo);
     state.clips.delete(viejo);
-    p2.then((r) => URL.revokeObjectURL(r.url)).catch(() => {});
+    p.then((r) => URL.revokeObjectURL(r.url)).catch(() => {});
   }
   return promise;
 }
 
-/* Adelanta las siguientes oraciones para que la lectura no se corte. */
-function prefetchClips(p, k) {
-  if (!state.doc || state.engine !== "neural") return;
-  let para = p, sent = k, hechos = 0;
-  while (hechos < 3) {
-    const sents = sentencesFor(para);
-    if (sent + 1 < sents.length) sent++;
-    else if (para + 1 < state.doc.segments.length) { para++; sent = 0; }
-    else break;
-    fetchClip(para, sent).catch(() => {});
-    hechos++;
-  }
+/* Con el siguiente párrafo ya descargado, la lectura no se corta ni con la
+   pantalla bloqueada, donde el navegador apenas deja trabajar en segundo plano. */
+function prefetchNext(i) {
+  if (i + 1 < state.doc.segments.length) fetchPara(i + 1).catch(() => {});
 }
 
-function syncNeuralWords(words) {
+function syncKaraoke() {
   const t = state.audio.currentTime * 1000;
+  const palabras = state.timings;
+  if (!palabras.length) return;
   let lit = -1;
-  for (let i = 0; i < words.length; i++) {
-    if (t >= words[i].s) lit = i; else break;
+  for (let i = 0; i < palabras.length; i++) {
+    if (t >= palabras[i].s) lit = i; else break;
   }
   if (lit === state.litIdx) return;
+  state.litIdx = lit;
   for (let i = 0; i < state.words.length; i++) {
     const el = state.words[i].el;
     el.classList.toggle("sung", i < lit);
     el.classList.toggle("lit", i === lit);
     if (i === lit) el.classList.add("sung");
   }
-  state.litIdx = lit;
+  if (lit >= 0) {
+    const car = palabras[lit].cs;
+    const sents = sentencesFor(state.para);
+    let k = 0;
+    for (let i = 0; i < sents.length; i++) if (sents[i].cs <= car) k = i; else break;
+    markSentence(k);
+  }
 }
 
-async function speakNeural(token) {
-  const p = state.para, k = state.sent;
+function startSync() {
+  cancelAnimationFrame(state.raf);
+  const tick = () => {
+    syncKaraoke();
+    state.raf = requestAnimationFrame(tick);
+  };
+  state.raf = requestAnimationFrame(tick);
+}
+// rAF se detiene con la pantalla apagada; timeupdate mantiene el resaltado al volver.
+state.audio.addEventListener("timeupdate", () => { if (state.playing) syncKaraoke(); });
+
+/* Tiempo en el que empieza una oración, según los tiempos del motor. */
+function timeOfSentence(k) {
+  const s = sentencesFor(state.para)[k];
+  const w = state.timings.find((x) => x.cs >= s.cs);
+  return w ? Math.max(0, w.s / 1000 - 0.06) : 0;
+}
+
+async function playNeural(seekSent = null) {
+  const token = ++state.token;
+  const i = state.para;
+  setPlayUI("loading");
   try {
-    const { url, words } = await fetchClip(p, k);
+    const { url, words } = await fetchPara(i);
     if (token !== state.token) return;
-    state.audio.src = url;
+    state.timings = words;
+    state.litIdx = -1;
+    if (state.audio.src !== url) state.audio.src = url;
     state.audio.playbackRate = 1;
+    if (seekSent !== null) {
+      await new Promise((r) => {
+        if (state.audio.readyState >= 1) return r();
+        state.audio.addEventListener("loadedmetadata", r, { once: true });
+        setTimeout(r, 1500);
+      });
+      if (token !== state.token) return;
+      state.audio.currentTime = timeOfSentence(seekSent);
+    }
     await state.audio.play();
     if (token !== state.token) { state.audio.pause(); return; }
     state.playing = true;
@@ -480,25 +479,16 @@ async function speakNeural(token) {
     setPlayUI("playing");
     setImmersive(true);
     requestWakeLock();
-    prefetchClips(p, k);
-
-    cancelAnimationFrame(state.raf);
-    const tick = () => {
-      if (token !== state.token) return;
-      syncNeuralWords(words);
-      state.raf = requestAnimationFrame(tick);
-    };
-    state.raf = requestAnimationFrame(tick);
+    updateMediaSession();
+    startSync();
+    prefetchNext(i);
   } catch (err) {
     if (token !== state.token) return;
-    // Si el motor falla, la lectura continúa con la voz del dispositivo.
-    const v = bestVoiceFor(paraLang(p));
+    const v = bestDeviceVoice(paraLang(i));
     if (v) {
-      saveSettings(paraLang(p) === "es" ? { voice_es: "device:" + v.voiceURI }
-                                        : { voice_en: "device:" + v.voiceURI });
-      updateChips();
+      state.engine = "device";
       toast("Motor de voz no disponible: seguimos con la voz del dispositivo.");
-      speakCurrent();
+      speakDevice();
       return;
     }
     state.playing = false;
@@ -508,194 +498,294 @@ async function speakNeural(token) {
 }
 
 state.audio.addEventListener("ended", () => {
-  if (state.playing && state.engine === "neural") advance();
+  if (!state.playing || state.engine !== "neural") return;
+  if (state.para + 1 < state.doc.segments.length) {
+    setCurrent(state.para + 1, 0);
+    playNeural();
+  } else {
+    finishDocument();
+  }
 });
 
-function speakCurrent() {
-  if (!state.doc) return;
+/* ---------- respaldo: voz del dispositivo ---------- */
 
-  if (isNeural(voiceForPara(state.para)) && engineUrl()) {
-    const token = ++state.token;
-    window.speechSynthesis?.cancel();
-    setPlayUI("loading");
-    speakNeural(token);
-    return;
-  }
-
+let keepAlive = 0;
+function speakDevice() {
   if (!("speechSynthesis" in window)) { toast("Este navegador no tiene voces integradas", true); return; }
-
   const token = ++state.token;
-  state.engine = "device";
-  state.audio.pause();
-  const sents = sentencesFor(state.para);
-  const s = sents[state.sent];
-  const text = sentenceText(state.para, state.sent);
-  const voice = voiceByRef(voiceForPara(state.para));
+  const s = sentencesFor(state.para)[state.sent];
+  const texto = sentenceText(state.para, state.sent);
+  const voz = bestDeviceVoice(paraLang(state.para));
 
-  const u = new SpeechSynthesisUtterance(text);
-  if (voice) { u.voice = voice; u.lang = voice.lang; }
-  else u.lang = paraLang(state.para) === "es" ? "es-MX" : "en-US";
+  const u = new SpeechSynthesisUtterance(texto);
+  if (voz) { u.voice = voz; u.lang = voz.lang; }
   u.rate = Math.min(MAX_SPEED, state.settings.speed);
-  u.volume = state.testVolume ?? 1;
-
-  let boundarySeen = false;
   u.onboundary = (e) => {
-    if (token !== state.token) return;
-    if (typeof e.charIndex !== "number") return;
-    boundarySeen = true;
-    clearInterval(estimator);
-    markLitByChar(s.cs + e.charIndex);
+    if (token !== state.token || typeof e.charIndex !== "number") return;
+    const abs = s.cs + e.charIndex;
+    let lit = -1;
+    for (let i = 0; i < state.words.length; i++) {
+      if (state.words[i].c <= abs) lit = i; else break;
+    }
+    if (lit === state.litIdx) return;
+    state.litIdx = lit;
+    state.words.forEach((w, i) => {
+      w.el.classList.toggle("sung", i <= lit);
+      w.el.classList.toggle("lit", i === lit);
+    });
   };
   u.onend = () => {
     if (token !== state.token || !state.playing) return;
-    advance();
+    const sents = sentencesFor(state.para);
+    if (state.sent + 1 < sents.length) { setCurrent(state.para, state.sent + 1); speakDevice(); }
+    else if (state.para + 1 < state.doc.segments.length) { setCurrent(state.para + 1, 0); speakDevice(); }
+    else finishDocument();
   };
-  u.onerror = (e) => {
-    if (token !== state.token) return;
-    if (e.error === "interrupted" || e.error === "canceled") return;
-    state.playing = false;
-    setPlayUI("paused");
-    toast(`Voz del dispositivo: ${e.error || "error"}`, true);
-  };
-
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(u);
   state.playing = true;
+  state.engine = "device";
   setPlayUI("playing");
   setImmersive(true);
   requestWakeLock();
-
-  // Algunos motores no emiten límites de palabra: se estima por tiempo.
-  const start = performance.now();
-  const charsPerSec = 14 * u.rate;
-  clearInterval(estimator);
-  estimator = setInterval(() => {
-    if (token !== state.token || boundarySeen) { clearInterval(estimator); return; }
-    if (!window.speechSynthesis.speaking) return;
-    markLitByChar(s.cs + ((performance.now() - start) / 1000) * charsPerSec);
-  }, 200);
-
   clearInterval(keepAlive);
   keepAlive = setInterval(() => {
     if (state.playing && window.speechSynthesis.speaking) window.speechSynthesis.resume();
   }, 10000);
 }
 
-function advance() {
-  const sents = sentencesFor(state.para);
-  if (state.sent + 1 < sents.length) {
-    setCurrent(state.para, state.sent + 1);
-    speakCurrent();
-  } else if (state.para + 1 < state.doc.segments.length) {
-    setCurrent(state.para + 1, 0);
-    speakCurrent();
-  } else {
-    finishDocument();
-  }
+/* ---------- control de reproducción ---------- */
+
+function usaNeural() {
+  return Boolean(engineUrl()) && voiceById(voiceForPara(state.para)) !== undefined;
+}
+
+function play(seekSent = null) {
+  $("endCap").classList.add("hidden");
+  if (usaNeural()) playNeural(seekSent);
+  else speakDevice();
+}
+
+function stopPlayback() {
+  state.token++;
+  state.playing = false;
+  cancelAnimationFrame(state.raf);
+  clearInterval(keepAlive);
+  state.audio.pause();
+  window.speechSynthesis?.cancel();
+  setPlayUI("paused");
+  setImmersive(false);
+  savePosition();
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
 }
 
 function finishDocument() {
-  stopSpeech();
+  stopPlayback();
   $("endCap").classList.remove("hidden");
 }
 
 function togglePlay() {
-  if (state.playing) {
-    stopSpeech();
-  } else {
-    $("endCap").classList.add("hidden");
-    speakCurrent();
-  }
+  if (state.playing) stopPlayback();
+  else play();
 }
 
-/* Saltar a una oración concreta (clic del usuario) o a un párrafo (botones). */
-function goTo(para, sent, { keepPlaying = true } = {}) {
-  const wasPlaying = state.playing;
+/* Salto a una oración: con el motor es instantáneo, sin volver a pedir audio. */
+function goToSentence(para, sent) {
+  const sonando = state.playing;
+  const mismoParrafo = para === state.para;
   state.token++;
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  state.audio.pause();
+  window.speechSynthesis?.cancel();
   cancelAnimationFrame(state.raf);
-  clearInterval(estimator);
   state.translation = null;
+
+  if (usaNeural() && mismoParrafo && state.timings.length) {
+    setCurrent(para, sent, { redraw: false });
+    markSentence(sent);
+    state.audio.currentTime = timeOfSentence(sent);
+    state.litIdx = -1;
+    if (sonando) { state.token++; state.playing = true; state.audio.play().catch(() => {}); startSync(); }
+    return;
+  }
+  state.audio.pause();
   setCurrent(para, sent);
-  if (wasPlaying && keepPlaying) speakCurrent();
+  if (sonando) play(sent);
   else { state.playing = false; setPlayUI("paused"); }
 }
 
-const goToPara = (i) => goTo(Math.max(0, Math.min(state.doc.segments.length - 1, i)), 0);
+function goToPara(i) {
+  const destino = Math.max(0, Math.min(state.doc.segments.length - 1, i));
+  const sonando = state.playing;
+  state.token++;
+  state.audio.pause();
+  window.speechSynthesis?.cancel();
+  cancelAnimationFrame(state.raf);
+  state.translation = null;
+  setCurrent(destino, 0);
+  if (sonando) play();
+  else { state.playing = false; setPlayUI("paused"); }
+}
 
 function setPlayUI(mode) {
   $("iconPlay").classList.toggle("hidden", mode !== "paused");
   $("iconPause").classList.toggle("hidden", mode !== "playing");
   $("iconSpin").classList.toggle("hidden", mode !== "loading");
+  $("playLabel").textContent = mode === "playing" ? "Pausa" : "Leer";
   $("btnPlay").setAttribute("aria-label", mode === "playing" ? "Pausa" : "Reproducir");
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = mode === "playing" ? "playing" : "paused";
+  }
 }
 
 function setImmersive(on) {
   $("reader").classList.toggle("immersive", on);
-  if (on) closePopovers();
+  if (on) { closePopovers(); hideHlMenu(); }
 }
 
-/* ---------- traducción: solo la oración actual, bajo demanda ---------- */
+/* ---------- pantalla de bloqueo y pantalla encendida ---------- */
+
+function updateMediaSession() {
+  if (!("mediaSession" in navigator) || !state.doc) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: state.doc.title,
+    artist: voiceById(voiceForPara(state.para))?.name || "Lyrio",
+    album: `Párrafo ${state.para + 1} de ${state.doc.segments.length}`,
+    artwork: [{ src: "icon-512.png", sizes: "512x512", type: "image/png" }],
+  });
+  const set = (accion, fn) => { try { navigator.mediaSession.setActionHandler(accion, fn); } catch {} };
+  set("play", () => { if (!state.playing) play(); });
+  set("pause", () => stopPlayback());
+  set("previoustrack", () => goToPara(state.para - 1));
+  set("nexttrack", () => goToPara(state.para + 1));
+  set("seekbackward", () => goToPara(state.para - 1));
+  set("seekforward", () => goToPara(state.para + 1));
+}
+
+async function requestWakeLock() {
+  if (state.wakeLock || document.visibilityState !== "visible") return;
+  try {
+    state.wakeLock = await navigator.wakeLock?.request("screen");
+    state.wakeLock?.addEventListener?.("release", () => { state.wakeLock = null; });
+  } catch { /* el navegador no lo permite */ }
+}
+function releaseWakeLock() {
+  state.wakeLock?.release().catch(() => {});
+  state.wakeLock = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    if (state.doc) requestWakeLock();
+  } else {
+    savePosition();
+  }
+});
+
+/* ---------- subrayados ---------- */
+
+function hlKey(p, s) { return `${p}:${s}`; }
+
+function showHlMenu(sn, p, s) {
+  state.pick = { sn, p, s };
+  document.querySelectorAll(".sn.picked").forEach((el) => el.classList.remove("picked"));
+  sn.classList.add("picked");
+  const menu = $("hlMenu");
+  menu.classList.remove("hidden");
+  const r = sn.getBoundingClientRect();
+  const mw = menu.offsetWidth || 300;
+  const mh = menu.offsetHeight || 46;
+  let x = r.left + r.width / 2 - mw / 2;
+  x = Math.max(10, Math.min(x, window.innerWidth - mw - 10));
+  let y = r.top - mh - 10;
+  if (y < 10) y = Math.min(r.bottom + 10, window.innerHeight - mh - 10);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+function hideHlMenu() {
+  $("hlMenu").classList.add("hidden");
+  document.querySelectorAll(".sn.picked").forEach((el) => el.classList.remove("picked"));
+  state.pick = null;
+}
+
+async function setHighlight(color) {
+  if (!state.pick) return;
+  const { p, s, sn } = state.pick;
+  const k = hlKey(p, s);
+  if (color) { state.highlights[k] = color; sn.dataset.hl = color; }
+  else { delete state.highlights[k]; delete sn.dataset.hl; }
+  await saveHighlights(state.doc.id, state.highlights).catch(() => {});
+  hideHlMenu();
+}
+
+async function copyPicked() {
+  if (!state.pick) return;
+  const texto = sentenceText(state.pick.p, state.pick.s);
+  try {
+    await navigator.clipboard.writeText(texto);
+    toast("Oración copiada");
+  } catch {
+    toast("No se pudo copiar en este navegador", true);
+  }
+  hideHlMenu();
+}
+
+/* ---------- traducción ---------- */
 
 function attachTranslation(el, i) {
   el.querySelector(".trans")?.remove();
   const t = state.translation;
   if (!t || t.para !== i) return;
-  const target = el.querySelectorAll(".sn")[t.sent];
-  if (!target) return;
+  const destino = el.querySelectorAll(".sn")[t.sent];
+  if (!destino) return;
   const span = document.createElement("span");
   span.className = "trans" + (t.text ? "" : " loading");
   span.textContent = t.text || "traduciendo…";
-  target.after(span);
+  destino.after(span);
 }
 
 async function translateCurrentSentence() {
   if (!state.doc) return;
-  if (state.translation && state.translation.para === state.para && state.translation.sent === state.sent) {
-    state.translation = null;                       // segundo toque: ocultar
+  const t = state.translation;
+  if (t && t.para === state.para && t.sent === state.sent) {
+    state.translation = null;
     renderParagraph(state.para);
     updateChips();
     return;
   }
-  const para = state.para;
-  const sent = state.sent;
-  const text = sentenceText(para, sent);
-  const target = paraLang(para) === "es" ? "en" : "es";
+  const para = state.para, sent = state.sent;
+  const texto = sentenceText(para, sent);
+  const destino = paraLang(para) === "es" ? "en" : "es";
   state.translation = { para, sent, text: "" };
   renderParagraph(para);
   updateChips();
   try {
-    const translated = await geminiTranslate(text, target);
+    const traducido = await geminiTranslate(texto, destino);
     if (state.translation?.para === para && state.translation?.sent === sent) {
-      state.translation.text = translated;
+      state.translation.text = traducido;
     }
   } catch (err) {
     if (state.translation?.para === para && state.translation?.sent === sent) {
       state.translation.text = `⚠ ${err.message}`;
     }
   }
-  renderParagraph(para);
+  if (state.para === para) renderParagraph(para);
 }
 
 const LANG_NAMES = { es: "español latinoamericano natural", en: "natural American English" };
 
 async function geminiTranslate(text, target) {
   const apiKey = (state.settings.gemini_api_key || "").trim();
-  if (!apiKey) {
-    throw new Error("Configura tu API key de Google AI Studio en Ajustes (aistudio.google.com/apikey — es gratis).");
-  }
-  const cached = await getCachedTranslation(target, text).catch(() => null);
-  if (cached) return cached;
+  if (!apiKey) throw new Error("Configura tu API key de Google AI Studio en Ajustes (es gratis).");
+  const cache = await getCachedTranslation(target, text).catch(() => null);
+  if (cache) return cache;
 
   const prompt = `Traduce el siguiente texto a ${LANG_NAMES[target] || target}. ` +
     "Mantén el tono y el significado, con fluidez nativa. " +
     "Responde ÚNICAMENTE con la traducción, sin comentarios.\n\n" + text;
   const override = (state.settings.gemini_model || "").trim();
-  const models = override ? [override] : GEMINI_MODELS.filter((m) => !geminiBadModels.has(m));
-  let lastError = "sin modelos disponibles";
+  const modelos = override ? [override] : GEMINI_MODELS.filter((m) => !geminiBadModels.has(m));
+  let ultimo = "sin modelos disponibles";
 
-  for (const model of models.length ? models : GEMINI_MODELS) {
+  for (const model of modelos.length ? modelos : GEMINI_MODELS) {
     let res;
     try {
       res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -703,72 +793,47 @@ async function geminiTranslate(text, target) {
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2 } }),
       });
-    } catch {
-      throw new Error("Sin conexión con Google (¿hay internet?)");
-    }
+    } catch { throw new Error("Sin conexión con Google (¿hay internet?)"); }
     if (res.ok) {
-      const translated = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      if (!translated) throw new Error("Gemini devolvió una respuesta inesperada");
-      cacheTranslation(target, text, translated).catch(() => {});
-      return translated;
+      const out = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (!out) throw new Error("Gemini devolvió una respuesta inesperada");
+      cacheTranslation(target, text, out).catch(() => {});
+      return out;
     }
-    let message = "";
-    try { message = (await res.json())?.error?.message || ""; } catch {}
-    lastError = message || `HTTP ${res.status}`;
+    let mensaje = "";
+    try { mensaje = (await res.json())?.error?.message || ""; } catch {}
+    ultimo = mensaje || `HTTP ${res.status}`;
     if (res.status === 429) throw new Error("Google limitó el uso por ahora. Espera un momento.");
-    if (UNAVAILABLE_HINTS.some((h) => message.toLowerCase().includes(h))) {
-      geminiBadModels.add(model);
-      continue;
-    }
-    throw new Error(`Gemini API: ${lastError}`);
+    if (UNAVAILABLE_HINTS.some((h) => mensaje.toLowerCase().includes(h))) { geminiBadModels.add(model); continue; }
+    throw new Error(`Gemini API: ${ultimo}`);
   }
-  throw new Error(`Gemini API: ${lastError}`);
+  throw new Error(`Gemini API: ${ultimo}`);
 }
 
 /* ---------- posición ---------- */
 
 let posTimer = 0;
-function schedulePositionSave() {
+const schedulePositionSave = () => {
   clearTimeout(posTimer);
   posTimer = setTimeout(savePosition, 1500);
-}
+};
 function savePosition() {
-  if (!state.doc) return;
-  storePosition(state.doc.id, state.para).catch(() => {});
+  if (state.doc) storePosition(state.doc.id, state.para).catch(() => {});
 }
 window.addEventListener("pagehide", savePosition);
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") savePosition();
-});
-
-async function requestWakeLock() {
-  try { state.wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
-}
-function releaseWakeLock() {
-  state.wakeLock?.release().catch(() => {});
-  state.wakeLock = null;
-}
 
 /* ---------- capítulos ---------- */
 
-function currentChapterPos() {
-  const chapters = state.doc?.chapters || [];
-  let current = -1;
-  for (let k = 0; k < chapters.length; k++) {
-    if (chapters[k].seg <= state.para) current = k; else break;
-  }
-  return current;
-}
-
 function openChapters() {
-  const chapters = state.doc?.chapters || [];
-  if (!chapters.length) return;
+  const capitulos = state.doc?.chapters || [];
+  if (!capitulos.length) return;
   const wrap = $("chapterList");
   wrap.innerHTML = "";
-  const active = currentChapterPos();
-  chapters.forEach((ch, k) => {
+  let actual = -1;
+  capitulos.forEach((c, k) => { if (c.seg <= state.para) actual = k; });
+  capitulos.forEach((ch, k) => {
     const btn = document.createElement("button");
-    btn.className = "chapter-item" + (k === active ? " active" : "");
+    btn.className = "chapter-item" + (k === actual ? " active" : "");
     btn.innerHTML = `<span class="ch-n">${k + 1}</span><span class="ch-t"></span>`;
     btn.querySelector(".ch-t").textContent = ch.title;
     btn.addEventListener("click", () => { closeSheet(); goToPara(ch.seg); });
@@ -779,103 +844,126 @@ function openChapters() {
   wrap.querySelector(".chapter-item.active")?.scrollIntoView({ block: "center" });
 }
 
-/* ---------- chips y desplegables ---------- */
-
-function voiceLabel(id) {
-  const n = neuralById(id);
-  if (n) return `${n.name} · ${n.gender === "F" ? "♀" : "♂"}`;
-  const v = voiceByRef(id);
-  return v ? shortVoiceName(v.name) : "Voz";
-}
+/* ---------- barra y desplegables ---------- */
 
 function updateChips() {
-  $("chipVoice").textContent = voiceLabel(voiceForPara(state.para));
+  const v = voiceById(voiceForPara(state.para));
+  $("voiceName").textContent = v ? v.name : "Voz";
   $("chipSpeed").textContent = `${state.settings.speed.toFixed(2).replace(/0$/, "")}×`;
   const t = state.translation;
   $("chipTranslate").classList.toggle("active", Boolean(t && t.para === state.para && t.sent === state.sent));
 }
 
 function closePopovers() {
-  $("popSpeed").classList.add("hidden");
-  $("popSize").classList.add("hidden");
-  $("chipSpeed").classList.remove("open");
-  $("chipFont").classList.remove("open");
+  ["popVoices", "popSpeed", "popSize"].forEach((id) => $(id).classList.add("hidden"));
+  ["chipVoice", "chipSpeed", "chipFont"].forEach((id) => $(id).classList.remove("open"));
 }
 
-function togglePopover(which) {
-  const pop = which === "speed" ? $("popSpeed") : $("popSize");
-  const chip = which === "speed" ? $("chipSpeed") : $("chipFont");
-  const wasOpen = !pop.classList.contains("hidden");
+function togglePopover(cual) {
+  const mapa = { voces: ["popVoices", "chipVoice"], vel: ["popSpeed", "chipSpeed"], tam: ["popSize", "chipFont"] };
+  const [popId, chipId] = mapa[cual];
+  const abierto = !$(popId).classList.contains("hidden");
   closePopovers();
-  if (wasOpen) return;
-  if (which === "speed") {
+  if (abierto) return;
+  if (cual === "vel") {
     $("speedRange").value = state.settings.speed;
     $("speedOut").textContent = `${state.settings.speed.toFixed(2).replace(/0$/, "")}×`;
-  } else {
+  } else if (cual === "tam") {
     $("sizeRange").value = state.settings.fontSize;
     $("sizeOut").textContent = `${state.settings.fontSize} px`;
+  } else {
+    state.filterLang = paraLang(state.para);
+    state.filterRegion = "";
+    renderVoicePicker();
   }
-  pop.classList.remove("hidden");
-  chip.classList.add("open");
+  $(popId).classList.remove("hidden");
+  $(chipId).classList.add("open");
 }
 
-function selectVoice(lang, id) {
-  saveSettings(lang === "es" ? { voice_es: id } : { voice_en: id });
+function renderVoicePicker() {
+  const idiomas = $("voiceLangs");
+  idiomas.innerHTML = "";
+  for (const [id, etiqueta] of [["es", "Español"], ["en", "English"]]) {
+    const b = document.createElement("button");
+    b.className = "pill" + (state.filterLang === id ? " on" : "");
+    b.textContent = etiqueta;
+    b.addEventListener("click", () => { state.filterLang = id; state.filterRegion = ""; renderVoicePicker(); });
+    idiomas.appendChild(b);
+  }
+
+  const delIdioma = state.voices.filter((v) => v.lang === state.filterLang);
+  const regiones = [...new Set(delIdioma.map((v) => v.region))].sort();
+  const barra = $("voiceRegions");
+  barra.innerHTML = "";
+  const todos = document.createElement("button");
+  todos.className = "pill" + (state.filterRegion ? "" : " on");
+  todos.textContent = "Todos";
+  todos.addEventListener("click", () => { state.filterRegion = ""; renderVoicePicker(); });
+  barra.appendChild(todos);
+  for (const r of regiones) {
+    const b = document.createElement("button");
+    b.className = "pill" + (state.filterRegion === r ? " on" : "");
+    b.textContent = r;
+    b.addEventListener("click", () => { state.filterRegion = r; renderVoicePicker(); });
+    barra.appendChild(b);
+  }
+
+  const lista = delIdioma.filter((v) => !state.filterRegion || v.region === state.filterRegion);
+  const wrap = $("voiceList");
+  wrap.innerHTML = "";
+  const activa = state.filterLang === "es" ? state.settings.voice_es : state.settings.voice_en;
+  for (const v of lista) {
+    const btn = document.createElement("button");
+    btn.className = "voice-item" + (v.id === activa ? " active" : "");
+    btn.innerHTML = `<span class="vg">${v.gender === "F" ? "♀" : "♂"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
+    btn.querySelector(".vn").textContent = v.name;
+    btn.querySelector(".vr").textContent = v.region;
+    btn.addEventListener("click", () => selectVoice(v));
+    wrap.appendChild(btn);
+  }
+  const es = state.voices.filter((v) => v.lang === "es").length;
+  const en = state.voices.filter((v) => v.lang === "en").length;
+  $("voiceCount").textContent = `${es} voces en español · ${en} en inglés`;
+}
+
+function selectVoice(v) {
+  saveSettings(v.lang === "es" ? { voice_es: v.id } : { voice_en: v.id });
   state.clips.clear();
-  renderVoiceLists();
+  renderVoicePicker();
   updateChips();
-  if (state.playing) { state.token++; speakCurrent(); }
+  updateMediaSession();
+  if (state.playing) { state.token++; state.audio.pause(); play(); }
 }
 
-function renderVoiceLists() {
-  refreshDeviceVoices();
-  const motor = Boolean(engineUrl());
-  $("voiceHint").textContent = motor
-    ? "Voces neuronales de Microsoft: iguales en todos tus dispositivos, sin límite, con resaltado exacto."
-    : "Configura el motor de voz más abajo para usar las voces neuronales de Microsoft en cualquier dispositivo.";
+/* ---------- hoja de ajustes ---------- */
 
-  for (const [lang, containerId] of [["es", "neuralVoicesEs"], ["en", "neuralVoicesEn"]]) {
-    const wrap = $(containerId);
-    wrap.innerHTML = "";
-    for (const v of NEURAL_VOICES.filter((x) => x.lang === lang)) {
-      const activa = (lang === "es" ? state.settings.voice_es : state.settings.voice_en) === v.id;
-      const btn = document.createElement("button");
-      btn.className = "voice-item" + (activa ? " active" : "") + (motor ? "" : " disabled");
-      btn.innerHTML = `<span class="vg">${v.gender === "F" ? "♀" : "♂"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
-      btn.querySelector(".vn").textContent = v.name;
-      btn.querySelector(".vr").textContent = v.region;
-      if (motor) btn.addEventListener("click", () => selectVoice(lang, v.id));
-      wrap.appendChild(btn);
-    }
+function renderThemes() {
+  const wrap = $("themeChips");
+  wrap.innerHTML = "";
+  for (const t of TEMAS) {
+    const btn = document.createElement("button");
+    btn.className = "theme-card" + (state.settings.theme === t.id ? " active" : "");
+    btn.innerHTML = `<span class="swatch" style="background:${t.bg};color:${t.fg}">Aa</span><span></span>`;
+    btn.querySelector("span:last-child").textContent = t.name;
+    btn.addEventListener("click", () => { saveSettings({ theme: t.id }); renderThemes(); });
+    wrap.appendChild(btn);
   }
+}
 
-  for (const [lang, containerId] of [["es", "devVoicesEs"], ["en", "devVoicesEn"]]) {
-    const wrap = $(containerId);
-    wrap.innerHTML = "";
-    const pool = deviceVoices.filter((v) => v.lang.toLowerCase().startsWith(lang));
-    wrap.closest(".voice-group").classList.toggle("hidden", pool.length === 0);
-    for (const v of pool) {
-      const id = "device:" + v.voiceURI;
-      const active = (lang === "es" ? state.settings.voice_es : state.settings.voice_en) === id;
-      const neural = /natural|online|enhanced|premium/i.test(v.name);
-      const btn = document.createElement("button");
-      btn.className = "voice-item" + (active ? " active" : "");
-      btn.innerHTML = `<span class="vg">${neural ? "★" : "♪"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
-      btn.querySelector(".vn").textContent = shortVoiceName(v.name);
-      btn.querySelector(".vr").textContent = v.lang + (neural ? " · Neural" : "");
-      btn.addEventListener("click", () => selectVoice(lang, id));
-      wrap.appendChild(btn);
-    }
-  }
+function highlightChipRows() {
+  $("fontChips").querySelectorAll(".chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.font === state.settings.font));
+  $("widthChips").querySelectorAll(".chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.width === (state.settings.width || "medio")));
 }
 
 function openSheet() {
-  renderVoiceLists();
+  renderThemes();
+  highlightChipRows();
   $("engineUrl").value = state.settings.engine_url || "";
   $("engineStatus").textContent = engineUrl() ? "✓ Motor configurado" : "";
   $("geminiKey").value = state.settings.gemini_api_key || "";
   $("keyStatus").textContent = state.settings.gemini_api_key ? "✓ Clave configurada" : "";
-  highlightChipRows();
   $("sheet").classList.remove("hidden");
   $("sheetBackdrop").classList.remove("hidden");
 }
@@ -884,15 +972,6 @@ function closeSheet() {
   $("sheet").classList.add("hidden");
   $("chapterSheet").classList.add("hidden");
   $("sheetBackdrop").classList.add("hidden");
-}
-
-function highlightChipRows() {
-  $("fontChips").querySelectorAll(".chip").forEach((c) =>
-    c.classList.toggle("active", c.dataset.font === state.settings.font));
-  $("themeChips").querySelectorAll(".chip").forEach((c) =>
-    c.classList.toggle("active", c.dataset.theme === state.settings.theme));
-  $("widthChips").querySelectorAll(".chip").forEach((c) =>
-    c.classList.toggle("active", c.dataset.width === (state.settings.width || "medio")));
 }
 
 /* ---------- eventos ---------- */
@@ -916,26 +995,55 @@ function wireEvents() {
   $("btnPrev").addEventListener("click", () => goToPara(state.para - 1));
   $("btnNext").addEventListener("click", () => goToPara(state.para + 1));
   $("btnSettings").addEventListener("click", openSheet);
+  $("btnSettings2").addEventListener("click", openSheet);
+  $("btnChapters").addEventListener("click", openChapters);
   $("docTitle").addEventListener("click", openChapters);
-  $("chipVoice").addEventListener("click", openSheet);
-  $("chipSpeed").addEventListener("click", () => togglePopover("speed"));
-  $("chipFont").addEventListener("click", () => togglePopover("size"));
+  $("chipVoice").addEventListener("click", () => togglePopover("voces"));
+  $("chipSpeed").addEventListener("click", () => togglePopover("vel"));
+  $("chipFont").addEventListener("click", () => togglePopover("tam"));
   $("chipTranslate").addEventListener("click", translateCurrentSentence);
   $("sheetBackdrop").addEventListener("click", closeSheet);
 
-  // clic en una oración -> rebobina a ella
-  $("segments").addEventListener("click", (e) => {
+  /* lectura: toque en oración salta; mantener pulsado abre el menú de subrayado;
+     toque en cualquier zona vacía muestra u oculta los controles */
+  let pressTimer = 0, pressed = null, moved = false;
+  const stage = $("stage");
+
+  const startPress = (e) => {
+    const sn = e.target.closest?.(".sn");
+    moved = false;
+    pressed = sn || null;
+    clearTimeout(pressTimer);
+    if (!sn || state.playing) return;
+    const p = Number(sn.closest(".seg").dataset.i);
+    const s = Number(sn.dataset.s);
+    pressTimer = setTimeout(() => { pressed = null; showHlMenu(sn, p, s); }, LONG_PRESS_MS);
+  };
+  const cancelPress = () => { clearTimeout(pressTimer); };
+
+  stage.addEventListener("pointerdown", startPress);
+  stage.addEventListener("pointermove", () => { moved = true; cancelPress(); });
+  stage.addEventListener("pointerup", cancelPress);
+  stage.addEventListener("pointercancel", cancelPress);
+  stage.addEventListener("contextmenu", (e) => { if (e.target.closest(".sn")) e.preventDefault(); });
+
+  stage.addEventListener("click", (e) => {
+    if (moved) return;
+    if (!$("hlMenu").classList.contains("hidden")) { hideHlMenu(); return; }
     const sn = e.target.closest(".sn");
-    if (sn) {
-      const p = Number(sn.closest(".seg").dataset.i);
-      goTo(p, Number(sn.dataset.s));
+    if (sn && pressed === sn) {
+      goToSentence(Number(sn.closest(".seg").dataset.i), Number(sn.dataset.s));
       return;
     }
-    if (!e.target.closest(".seg")) setImmersive(!$("reader").classList.contains("immersive"));
+    if (!sn) setImmersive(!$("reader").classList.contains("immersive"));
   });
 
   ["wheel", "touchmove"].forEach((ev) =>
-    $("stage").addEventListener(ev, () => { state.userScrolledAt = Date.now(); }, { passive: true }));
+    stage.addEventListener(ev, () => { state.userScrolledAt = Date.now(); }, { passive: true }));
+
+  $("hlCopy").addEventListener("click", copyPicked);
+  $("hlMenu").querySelectorAll(".hl-dot").forEach((b) =>
+    b.addEventListener("click", () => setHighlight(b.dataset.c)));
 
   $("speedRange").addEventListener("input", (e) => {
     const speed = Number(e.target.value);
@@ -943,7 +1051,10 @@ function wireEvents() {
     saveSettings({ speed });
     updateChips();
   });
-  $("speedRange").addEventListener("change", () => { if (state.playing) { state.token++; speakCurrent(); } });
+  $("speedRange").addEventListener("change", () => {
+    state.clips.clear();
+    if (state.playing) { state.token++; state.audio.pause(); play(state.sent); }
+  });
   $("sizeRange").addEventListener("input", (e) => {
     saveSettings({ fontSize: Number(e.target.value) });
     $("sizeOut").textContent = `${e.target.value} px`;
@@ -953,31 +1064,22 @@ function wireEvents() {
     const font = e.target.closest(".chip")?.dataset.font;
     if (font) { saveSettings({ font }); highlightChipRows(); }
   });
-  $("themeChips").addEventListener("click", (e) => {
-    const theme = e.target.closest(".chip")?.dataset.theme;
-    if (theme) { saveSettings({ theme }); highlightChipRows(); }
-  });
   $("widthChips").addEventListener("click", (e) => {
     const width = e.target.closest(".chip")?.dataset.width;
     if (width) { saveSettings({ width }); highlightChipRows(); }
   });
+
   $("saveEngine").addEventListener("click", async () => {
     const url = $("engineUrl").value.trim().replace(/\/+$/, "");
     saveSettings({ engine_url: url });
     state.clips.clear();
-    if (!url) {
-      autoPickVoices(); renderVoiceLists(); updateChips();
-      $("engineStatus").textContent = "Sin motor: se usan las voces del dispositivo.";
-      return;
-    }
+    if (!url) { $("engineStatus").textContent = "Sin motor: se usan las voces del dispositivo."; return; }
     $("engineStatus").textContent = "Comprobando… (puede tardar si estaba dormido)";
     try {
-      const res = await fetch(url + "/", { method: "GET" });
+      const res = await fetch(url + "/");
       const ok = res.ok && (await res.json()).service === "lyrio-voice";
-      $("engineStatus").textContent = ok
-        ? "✓ Motor conectado — ya puedes elegir voces de Microsoft"
-        : "⚠ Responde, pero no parece el motor de Lyrio";
-      if (ok) { autoPickVoices(); renderVoiceLists(); updateChips(); }
+      $("engineStatus").textContent = ok ? "✓ Motor conectado" : "⚠ Responde, pero no parece el motor de Lyrio";
+      if (ok) { await loadVoiceCatalog(); updateChips(); }
     } catch {
       $("engineStatus").textContent = "⚠ No se pudo conectar con esa dirección";
     }
@@ -994,23 +1096,25 @@ function wireEvents() {
     if (e.code === "Space") { e.preventDefault(); togglePlay(); }
     if (e.code === "ArrowRight") goToPara(state.para + 1);
     if (e.code === "ArrowLeft") goToPara(state.para - 1);
-    if (e.code === "Escape") { closeSheet(); closePopovers(); }
+    if (e.code === "Escape") { closeSheet(); closePopovers(); hideHlMenu(); }
   });
 }
 
 /* ---------- arranque ---------- */
 
-function boot() {
+async function boot() {
   wireEvents();
   applyDisplaySettings();
-  autoPickVoices();
   renderLibrary();
+  await loadVoiceCatalog();
+  updateChips();
 }
 
 boot();
 
 window.lyrio = {
-  state, uploadFile, goTo, goToPara, togglePlay, stopSpeech, setImmersive, openChapters,
-  saveSettings, exitReader, openSheet, closeSheet, togglePopover, renderVoiceLists,
-  translateCurrentSentence, sentencesFor,
+  state, uploadFile, goToSentence, goToPara, togglePlay, stopPlayback, setImmersive,
+  openChapters, saveSettings, exitReader, openSheet, closeSheet, togglePopover,
+  translateCurrentSentence, sentencesFor, renderVoicePicker, showHlMenu, hideHlMenu,
+  setHighlight, loadVoiceCatalog,
 };

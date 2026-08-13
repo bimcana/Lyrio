@@ -97,14 +97,24 @@ export const DEFAULT_SETTINGS = {
   engine_url: "https://lyrio-voz.onrender.com",
   gemini_api_key: "",
   gemini_model: "",
-  voice_es: "",          // se elige sola la mejor voz del dispositivo
-  voice_en: "",
+  voice_es: "es-MX-DaliaNeural",
+  voice_en: "en-US-AvaMultilingualNeural",
   speed: 1.0,
   font: "sans",
   fontSize: 26,
-  theme: "dark",
+  theme: "kindle",
   width: "medio",
 };
+
+/* subrayados por documento: { "parrafo:oracion": color } */
+
+export async function getHighlights(docId) {
+  return (await idbGet("kv", `hl:${docId}`)) || {};
+}
+
+export async function saveHighlights(docId, marcas) {
+  await idbPut("kv", `hl:${docId}`, marcas);
+}
 
 export function loadSettings() {
   try {

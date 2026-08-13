@@ -1,8 +1,8 @@
-/* Lyrio Web — client-side PDF extraction (pdf.js port of server/extract.py).
+﻿/* Lyrio Web — client-side PDF extraction (pdf.js port of server/extract.py).
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=7";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 
