@@ -2,13 +2,13 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=9";
-import { splitSentences } from "./sentences.js?v=9";
+import { extractFromPdf } from "./extract.js?v=12";
+import { splitSentences } from "./sentences.js?v=12";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=9";
+} from "./storage.js?v=12";
 
 const $ = (id) => document.getElementById(id);
 
@@ -876,7 +876,7 @@ function openChapters() {
 
 function updateChips() {
   const v = voiceById(voiceForPara(state.para));
-  $("voiceName").textContent = v ? v.name : "Voz";
+  $("voiceName").textContent = v ? nombreVoz(v) : "Voz";
   $("chipSpeed").textContent = `${state.settings.speed.toFixed(2).replace(/0$/, "")}×`;
   const t = state.translation;
   $("chipTranslate").classList.toggle("active", Boolean(t && t.para === state.para && t.sent === state.sent));
@@ -908,58 +908,131 @@ function togglePopover(cual) {
   $(chipId).classList.add("open");
 }
 
-function renderVoicePicker() {
-  const idiomas = $("voiceLangs");
+/* El mismo selector sirve en la barra del lector y en Ajustes; en Ajustes
+   además suena una frase de muestra al tocar cada voz. */
+function renderVoicePicker(destino = "voice", { conPrueba = false } = {}) {
+  const id = (sufijo) => (destino === "voice" ? `voice${sufijo}` : `setVoice${sufijo}`);
+  const repintar = () => renderVoicePicker(destino, { conPrueba });
+
+  const idiomas = $(id("Langs"));
   idiomas.innerHTML = "";
-  for (const [id, etiqueta] of [["es", "Español"], ["en", "English"]]) {
+  for (const [lang, etiqueta] of [["es", "Español"], ["en", "English"]]) {
     const b = document.createElement("button");
-    b.className = "pill" + (state.filterLang === id ? " on" : "");
+    b.className = "pill" + (state.filterLang === lang ? " on" : "");
     b.textContent = etiqueta;
-    b.addEventListener("click", () => { state.filterLang = id; state.filterRegion = ""; renderVoicePicker(); });
+    b.addEventListener("click", () => { state.filterLang = lang; state.filterRegion = ""; repintar(); });
     idiomas.appendChild(b);
   }
 
   const delIdioma = state.voices.filter((v) => v.lang === state.filterLang);
   const regiones = [...new Set(delIdioma.map((v) => v.region))].sort();
-  const barra = $("voiceRegions");
+  const barra = $(id("Regions"));
   barra.innerHTML = "";
   const todos = document.createElement("button");
   todos.className = "pill" + (state.filterRegion ? "" : " on");
   todos.textContent = "Todos";
-  todos.addEventListener("click", () => { state.filterRegion = ""; renderVoicePicker(); });
+  todos.addEventListener("click", () => { state.filterRegion = ""; repintar(); });
   barra.appendChild(todos);
   for (const r of regiones) {
     const b = document.createElement("button");
     b.className = "pill" + (state.filterRegion === r ? " on" : "");
     b.textContent = r;
-    b.addEventListener("click", () => { state.filterRegion = r; renderVoicePicker(); });
+    b.addEventListener("click", () => { state.filterRegion = r; repintar(); });
     barra.appendChild(b);
   }
 
   const lista = delIdioma.filter((v) => !state.filterRegion || v.region === state.filterRegion);
-  const wrap = $("voiceList");
+  const wrap = $(id("List"));
   wrap.innerHTML = "";
   const activa = state.filterLang === "es" ? state.settings.voice_es : state.settings.voice_en;
   for (const v of lista) {
     const btn = document.createElement("button");
     btn.className = "voice-item" + (v.id === activa ? " active" : "");
     btn.innerHTML = `<span class="vg">${v.gender === "F" ? "♀" : "♂"}</span><span><span class="vn"></span><span class="vr"></span></span>`;
-    btn.querySelector(".vn").textContent = v.name;
+    btn.querySelector(".vn").textContent = nombreVoz(v);
     btn.querySelector(".vr").textContent = v.region;
-    btn.addEventListener("click", () => selectVoice(v));
+    btn.addEventListener("click", () => {
+      selectVoice(v, { repintar: conPrueba ? repintar : null });
+      if (conPrueba) previewVoice(v, btn);
+    });
     wrap.appendChild(btn);
   }
   const es = state.voices.filter((v) => v.lang === "es").length;
   const en = state.voices.filter((v) => v.lang === "en").length;
-  $("voiceCount").textContent = `${es} voces en español · ${en} en inglés`;
+  $(id("Count")).textContent = `${es} voces en español · ${en} en inglés`;
 }
 
-function selectVoice(v) {
+/* ---------- prueba de voz ---------- */
+
+const previewAudio = new Audio();
+previewAudio.setAttribute("playsinline", "");
+
+/* Microsoft nombra sus voces sin tildes; aquí se muestran bien escritas. */
+const NOMBRES_CON_TILDE = {
+  Salome: "Salomé", Tomas: "Tomás", Alvaro: "Álvaro", Sofia: "Sofía",
+  Maria: "María", Andres: "Andrés", Sebastian: "Sebastián", Victor: "Víctor",
+};
+const nombreVoz = (v) => NOMBRES_CON_TILDE[v.name] || v.name;
+
+/* Las abreviaturas del catálogo se leerían mal en voz alta ("Rep punto"),
+   así que la frase de muestra usa el nombre completo. */
+const REGION_HABLADA = {
+  "Rep. Dominicana": "la República Dominicana",
+  "EE.UU.": "Estados Unidos",
+  "Reino Unido": "el Reino Unido",
+  "El Salvador": "El Salvador",
+  "Guinea Ecuatorial": "Guinea Ecuatorial",
+  "Costa Rica": "Costa Rica",
+  "Puerto Rico": "Puerto Rico",
+  "Nueva Zelanda": "Nueva Zelanda",
+};
+
+const GENTILICIO_EN = {
+  "EE.UU.": "American", "Reino Unido": "British", "Australia": "Australian",
+  "Canadá": "Canadian", "Irlanda": "Irish", "India": "Indian", "Nigeria": "Nigerian",
+  "Sudáfrica": "South African", "Nueva Zelanda": "New Zealand", "Filipinas": "Philippine",
+  "Singapur": "Singaporean", "Hong Kong": "Hong Kong", "Kenia": "Kenyan", "Tanzania": "Tanzanian",
+};
+
+function frasePrueba(v) {
+  if (v.lang === "es") {
+    const lugar = REGION_HABLADA[v.region] || v.region;
+    return `Hola, soy ${nombreVoz(v)} y leo con acento de ${lugar}. Así voy a sonar mientras te acompaño en la lectura.`;
+  }
+  const gentilicio = GENTILICIO_EN[v.region] || v.region;
+  const articulo = /^[AEIOU]/i.test(gentilicio) ? "an" : "a";
+  return `Hi, I'm ${v.name} and I read with ${articulo} ${gentilicio} accent. This is how I'll sound while I read along with you.`;
+}
+
+async function previewVoice(v, btn) {
+  const base = engineUrl();
+  if (!base) { toast("Configura el motor de voz en Ajustes para escuchar las voces.", true); return; }
+  previewAudio.pause();
+  document.querySelectorAll(".voice-item.sonando").forEach((e) => e.classList.remove("sonando"));
+  btn?.classList.add("sonando");
+  try {
+    const res = await fetch(`${base}/tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: frasePrueba(v), voice: v.id, speed: state.settings.speed }),
+    });
+    if (!res.ok) throw new Error("no disponible");
+    const data = await res.json();
+    const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
+    previewAudio.src = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+    await previewAudio.play();
+  } catch {
+    toast("No se pudo escuchar la voz (¿motor despertando?)", true);
+  }
+}
+previewAudio.addEventListener("ended", () =>
+  document.querySelectorAll(".voice-item.sonando").forEach((e) => e.classList.remove("sonando")));
+
+function selectVoice(v, { repintar = null } = {}) {
   saveSettings(v.lang === "es" ? { voice_es: v.id } : { voice_en: v.id });
   state.clips.clear();
-  renderVoicePicker();
-  updateChips();
-  updateMediaSession();
+  (repintar || renderVoicePicker)();
+  if (state.doc) { updateChips(); updateMediaSession(); }
   if (state.playing) { state.token++; state.audio.pause(); play(); }
 }
 
@@ -998,7 +1071,11 @@ function highlightChipRows() {
   $("scrollHint").textContent = SCROLL_HINTS[modo] || "";
 }
 
-function openSheet() {
+function openSheet({ desdeInicio = false } = {}) {
+  // Las voces con prueba de sonido solo en el inicio: dentro del lector ya
+  // están en la barra, y sonarían encima de la lectura.
+  $("secVoices").classList.toggle("hidden", !desdeInicio);
+  if (desdeInicio) renderVoicePicker("set", { conPrueba: true });
   renderThemes();
   highlightChipRows();
   $("engineUrl").value = state.settings.engine_url || "";
@@ -1010,6 +1087,7 @@ function openSheet() {
 }
 
 function closeSheet() {
+  previewAudio.pause();
   $("sheet").classList.add("hidden");
   $("chapterSheet").classList.add("hidden");
   $("sheetBackdrop").classList.add("hidden");
@@ -1035,8 +1113,9 @@ function wireEvents() {
   $("btnPlay").addEventListener("click", togglePlay);
   $("btnPrev").addEventListener("click", () => goToPara(state.para - 1));
   $("btnNext").addEventListener("click", () => goToPara(state.para + 1));
-  $("btnSettings").addEventListener("click", openSheet);
-  $("btnSettings2").addEventListener("click", openSheet);
+  $("homeSettings").addEventListener("click", () => openSheet({ desdeInicio: true }));
+  $("btnSettings").addEventListener("click", () => openSheet());
+  $("btnSettings2").addEventListener("click", () => openSheet());
   $("btnChapters").addEventListener("click", openChapters);
   $("docTitle").addEventListener("click", openChapters);
   $("chipVoice").addEventListener("click", () => togglePopover("voces"));

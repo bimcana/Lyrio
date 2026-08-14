@@ -141,12 +141,29 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 /* ============ INICIO ============ */
 
 #home {
+  position: relative;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: clamp(24px, 8vh, 80px) 20px 60px;
 }
+
+#homeSettings {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 14px);
+  right: 16px;
+}
+
+/* listas de voces dentro de Ajustes */
+#setVoiceLangs, #setVoiceRegions { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; }
+#setVoiceList {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  max-height: 46vh; overflow-y: auto;
+}
+@media (max-width: 480px) { #setVoiceList { grid-template-columns: 1fr; } }
+.voice-item.sonando { border-color: var(--lamp); }
+.voice-item.sonando .vg { background: var(--lamp); color: var(--on-lamp); }
 
 .brand { text-align: center; margin-bottom: clamp(28px, 6vh, 56px); }
 .brand h1 {

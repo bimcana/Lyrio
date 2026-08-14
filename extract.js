@@ -21,13 +21,24 @@ const ES_STOP = new Set(["el", "la", "los", "las", "de", "que", "en", "un", "una
 const EN_STOP = new Set(["the", "and", "of", "to", "in", "is", "it", "that", "for", "with", "as", "was", "on", "are", "this", "be"]);
 
 function cleanTitle(title) {
-  title = title.trim().replace(/^\s*Microsoft \w+\s*-\s*/, "");
+  title = normalizeAccents(title).trim().replace(/^\s*Microsoft \w+\s*-\s*/, "");
   title = title.replace(/\.(docx?|rtf|odt|pdf|txt)\s*$/i, "");
   return title.trim();
 }
 
-function cleanBlock(text) {
+/* Muchos PDF guardan los acentos por separado: la letra base y encima el
+   acento suelto. Para la í usan además la «i sin punto» (ı, una letra turca),
+   que el motor de voz no reconoce como vocal y se salta al leer. Aquí se
+   recomponen a la letra acentuada de toda la vida. */
+function normalizeAccents(text) {
   return text
+    .replace(/ı/g, "i")          // ı sin punto -> i
+    .replace(/ȷ/g, "j")          // ȷ sin punto -> j
+    .normalize("NFC");                // i + ́  -> í
+}
+
+function cleanBlock(text) {
+  return normalizeAccents(text)
     .replace(/­/g, "")
     .replace(/-\s*\n\s*/g, "")
     .replace(/\s*\n\s*/g, " ")
