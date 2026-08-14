@@ -51,8 +51,7 @@ Lo único que viaja fuera del dispositivo es el texto del párrafo que se está 
 | `webapp/styles.css` | Temas y diseño. |
 | `webapp/pdfjs/` | pdf.js 4.10.38 + `cmaps/` + `standard_fonts/` (necesarios, ver §5). |
 | `deploy/Lyrio/` | Copia de trabajo del repositorio; se usa al publicar. |
-| `motor-voz/` | El microservicio de voz (se despliega en Render). |
-| `server/`, `static/`, `data/` | Versión antigua que corría en la PC. **Ya no se usa**; se conserva por si acaso. |
+| `deploy/Lyrio/motor-voz/` | El microservicio de voz. **Vive solo aquí**, porque Render lo despliega desde el repositorio público. No moverlo ni borrarlo. |
 
 ---
 
@@ -79,7 +78,7 @@ Cada una costó tiempo; están comprobadas empíricamente.
 | Vía | Resultado |
 |---|---|
 | **Navegador → Microsoft directo** | ❌ Rechaza la conexión: exige `Origin: chrome-extension://…`, cabecera que los navegadores prohíben fijar. Por eso hace falta el motor. |
-| **Cloudflare Workers** | ❌ Microsoft acepta la conexión pero no envía audio (5 de 5 intentos). Es bloqueo por IP: el mismo código funciona en local con el runtime de Cloudflare. El worker sigue en `motor-cloudflare/` por si cambia. |
+| **Cloudflare Workers** | ❌ Microsoft acepta la conexión pero no envía audio (5 de 5 intentos). Es bloqueo por IP: el mismo código funcionaba en local con el runtime de Cloudflare. El worker se eliminó; está en el historial de git si alguna vez cambia la situación. |
 | **Hugging Face Spaces** | ❌ Docker pasó a plan de pago; solo los Spaces estáticos siguen gratis. |
 | **Voces Gemini (TTS)** | ❌ Cuota **diaria** minúscula: se agota en unos 4 párrafos. Medido: `GenerateRequestsPerDayPerProjectPerModel`. Sirve para traducir, no para leer. |
 | **Azure Speech** | ⚠️ Funcionaría (500 000 caracteres/mes gratis) pero pide tarjeta para verificar identidad. Descartada por preferencia del autor. |
