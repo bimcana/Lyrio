@@ -2,13 +2,13 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=16";
-import { splitSentences } from "./sentences.js?v=16";
+import { extractFromPdf } from "./extract.js?v=17";
+import { splitSentences } from "./sentences.js?v=17";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=16";
+} from "./storage.js?v=17";
 
 const $ = (id) => document.getElementById(id);
 

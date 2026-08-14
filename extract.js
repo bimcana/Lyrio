@@ -2,7 +2,7 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=7";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=17";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -30,8 +30,16 @@ function cleanTitle(title) {
    acento suelto. Para la í usan además la «i sin punto» (ı, una letra turca),
    que el motor de voz no reconoce como vocal y se salta al leer. Aquí se
    recomponen a la letra acentuada de toda la vida. */
+/* Las imprentas unen ciertas parejas en un solo signo (ﬁ, ﬂ, ﬀ…). Si llegan
+   así, la voz las lee mal o se las salta; aquí vuelven a ser letras sueltas. */
+const LIGADURAS = {
+  "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
+  "Ĳ": "IJ", "ĳ": "ij", "Œ": "OE", "œ": "oe", "Æ": "AE", "æ": "ae",
+};
+
 function normalizeAccents(text) {
   return text
+    .replace(/[ﬀ-ﬆĲĳŒœ]/g, (c) => LIGADURAS[c] ?? c)
     .replace(/ı/g, "i")          // ı sin punto -> i
     .replace(/ȷ/g, "j")          // ȷ sin punto -> j
     .normalize("NFC");                // i + ́  -> í
@@ -287,15 +295,28 @@ async function sha1Hex(buffer) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/* Sin estos datos auxiliares, pdf.js no sabe traducir los glifos de las
+   fuentes estándar ni de las codificaciones CID, y algunas letras salen
+   vacías (típicamente la f y sus ligaduras). */
+const BASE_PDFJS = new URL("./pdfjs/", import.meta.url).toString();
+
 export async function extractFromPdf(arrayBuffer, fileName) {
   const id = (await sha1Hex(arrayBuffer)).slice(0, 12);
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer.slice(0),
+    cMapUrl: `${BASE_PDFJS}cmaps/`,
+    cMapPacked: true,
+    standardFontDataUrl: `${BASE_PDFJS}standard_fonts/`,
+    useSystemFonts: false,
+  }).promise;
 
   const rawBlocks = [];
   const sizeCount = new Map();
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
+    // Sin la normalización de pdf.js (pensada para buscar, no para leer):
+    // es la que parte los acentos y deshace ligaduras perdiendo letras.
+    const content = await page.getTextContent({ disableNormalization: true });
     const pageHeight = page.getViewport({ scale: 1 }).height;
     const lines = linesFromItems(content.items);
     for (const block of blocksFromLines(lines, p, pageHeight)) {
