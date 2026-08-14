@@ -2,7 +2,7 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=17";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=18";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -10,6 +10,11 @@ const MAX_SEGMENT_CHARS = 600;
 const MIN_SEGMENT_CHARS = 3;
 const MAX_HEADING_CHARS = 90;
 const HEADING_MIN_SCORE = 3;
+
+/* Versión del motor de extracción. Se guarda en cada documento para poder
+   avisar cuando un libro de la biblioteca se procesó con un motor anterior
+   y conviene volver a arrastrar el PDF. */
+export const MOTOR_EXTRACCION = 2;
 
 const SENTENCE_SPLIT = /(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"'(«0-9])/;
 const HEADING_WORDS = /^\s*(cap[íi]tulo|chapter|parte|part|secci[óo]n|section|pilar|lecci[óo]n|lesson|libro|book|unidad|unit|tema|m[óo]dulo|module|ap[ée]ndice|appendix|pr[óo]logo|prologue|ep[íi]logo|epilogue|introducci[óo]n|introduction|conclusi[óo]n|conclusion|prefacio|preface)\b/i;
@@ -30,19 +35,30 @@ function cleanTitle(title) {
    acento suelto. Para la í usan además la «i sin punto» (ı, una letra turca),
    que el motor de voz no reconoce como vocal y se salta al leer. Aquí se
    recomponen a la letra acentuada de toda la vida. */
-/* Las imprentas unen ciertas parejas en un solo signo (ﬁ, ﬂ, ﬀ…). Si llegan
-   así, la voz las lee mal o se las salta; aquí vuelven a ser letras sueltas. */
+/* Las imprentas unen ciertas parejas en un solo signo (fi ligada, etc.). Si
+   llegan asi, la voz las lee mal o se las salta; aqui vuelven a ser letras
+   sueltas. U+F001/U+F002 son la convencion antigua de Adobe para fi/fl en el
+   area privada de Unicode: en pantalla no se ven y la voz las salta. */
 const LIGADURAS = {
-  "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
-  "Ĳ": "IJ", "ĳ": "ij", "Œ": "OE", "œ": "oe", "Æ": "AE", "æ": "ae",
+  "\uFB00": "ff", "\uFB01": "fi", "\uFB02": "fl", "\uFB03": "ffi", "\uFB04": "ffl",
+  "\uFB05": "st", "\uFB06": "st",
+  "\u0132": "IJ", "\u0133": "ij", "\u0152": "OE", "\u0153": "oe",
+  "\u00C6": "AE", "\u00E6": "ae",
+  "\uF001": "fi", "\uF002": "fl",
+  "\u017F": "s",              // s larga de imprentas antiguas
 };
 
 function normalizeAccents(text) {
   return text
-    .replace(/[ﬀ-ﬆĲĳŒœ]/g, (c) => LIGADURAS[c] ?? c)
-    .replace(/ı/g, "i")          // ı sin punto -> i
-    .replace(/ȷ/g, "j")          // ȷ sin punto -> j
-    .normalize("NFC");                // i + ́  -> í
+    .replace(/[\uFB00-\uFB06\u0132\u0133\u0152\u0153\u00C6\u00E6\uF001\uF002\u017F]/g, (c) => LIGADURAS[c] ?? c)
+    .replace(/\u0131/g, "i")          // i sin punto (turca) -> i
+    .replace(/\u0237/g, "j")          // j sin punto -> j
+    // Restos de mapas rotos y anchos invisibles: nulos y otros controles,
+    // area privada sin equivalencia, signo de reemplazo y espacios de ancho
+    // cero. En pantalla dejan huecos y la voz tropieza con ellos.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uE000-\uF8FF\uFFFD\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F\u2007]/g, " ")
+    .normalize("NFC");                // i + acento suelto -> i acentuada
 }
 
 function cleanBlock(text) {
@@ -300,6 +316,18 @@ async function sha1Hex(buffer) {
    vacías (típicamente la f y sus ligaduras). */
 const BASE_PDFJS = new URL("./pdfjs/", import.meta.url).toString();
 
+/* Cuenta letras que el PDF entrega ya rotas y que no se pueden recuperar:
+   nulos de mapas defectuosos, glifos del área privada sin equivalencia y
+   signos de reemplazo. Sirve para avisar con honestidad, no para adivinar. */
+function contarDanos(str, danos) {
+  for (const ch of str) {
+    const o = ch.codePointAt(0);
+    if (o === 0) danos.nulos++;
+    else if (o === 0xFFFD) danos.reemplazos++;
+    else if (o >= 0xE000 && o <= 0xF8FF && o !== 0xF001 && o !== 0xF002) danos.glifos++;
+  }
+}
+
 export async function extractFromPdf(arrayBuffer, fileName) {
   const id = (await sha1Hex(arrayBuffer)).slice(0, 12);
   const pdf = await pdfjsLib.getDocument({
@@ -312,11 +340,15 @@ export async function extractFromPdf(arrayBuffer, fileName) {
 
   const rawBlocks = [];
   const sizeCount = new Map();
+  const danos = { nulos: 0, glifos: 0, reemplazos: 0 };
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     // Sin la normalización de pdf.js (pensada para buscar, no para leer):
     // es la que parte los acentos y deshace ligaduras perdiendo letras.
     const content = await page.getTextContent({ disableNormalization: true });
+    for (const it of content.items) {
+      if (it.str) contarDanos(it.str, danos);
+    }
     const pageHeight = page.getViewport({ scale: 1 }).height;
     const lines = linesFromItems(content.items);
     for (const block of blocksFromLines(lines, p, pageHeight)) {
@@ -371,6 +403,7 @@ export async function extractFromPdf(arrayBuffer, fileName) {
   const pages = pdf.numPages;
   await pdf.destroy();
 
+  const totalDanos = danos.nulos + danos.glifos + danos.reemplazos;
   return {
     id,
     title: metaTitle || fileName.replace(/\.pdf$/i, ""),
@@ -378,5 +411,7 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     segments,
     chapters: finalChapters,
     lang: docLang,
+    motor: MOTOR_EXTRACCION,
+    ...(totalDanos ? { danos } : {}),
   };
 }

@@ -2,13 +2,14 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=17";
-import { splitSentences } from "./sentences.js?v=17";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=18";
+import { splitSentences } from "./sentences.js?v=18";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=17";
+  idbGet, idbPut,
+} from "./storage.js?v=18";
 
 const $ = (id) => document.getElementById(id);
 
@@ -221,6 +222,27 @@ async function openDoc(id) {
   await enterReader(doc, entry?.position || 0);
 }
 
+/* Señales de un texto guardado por un motor de extracción anterior:
+   ligaduras sin deshacer, glifos del área privada, nulos o la i turca.
+   Un libro así mejora al volver a arrastrar el PDF (no lo guardamos,
+   así que no podemos reprocesarlo solos). */
+const RE_TEXTO_VIEJO = /[\\uFB00-\\uFB06\\uE000-\\uF8FF\\u0000\\uFFFD\\u0131]/;
+
+async function avisarEstadoDoc(doc) {
+  const clave = `aviso:${doc.id}:${doc.motor || 0}`;
+  if (await idbGet("kv", clave).catch(() => null)) return;
+  let msg = "";
+  if ((!doc.motor || doc.motor < MOTOR_EXTRACCION)
+      && doc.segments.some((s) => RE_TEXTO_VIEJO.test(s.text))) {
+    msg = "Este libro se procesó con una versión anterior de Lyrio. Vuelve a arrastrar el PDF para que se vea y se lea mejor.";
+  } else if (doc.danos && doc.danos.nulos + doc.danos.glifos + doc.danos.reemplazos > 0) {
+    msg = "Este PDF trae defectos de origen en algunas letras. Lyrio leerá lo que el documento contiene.";
+  }
+  if (!msg) return;
+  toast(msg);
+  await idbPut("kv", clave, Date.now()).catch(() => {});
+}
+
 /* ---------- lector ---------- */
 
 async function enterReader(doc, position) {
@@ -256,6 +278,7 @@ async function enterReader(doc, position) {
   setCurrent(state.para, 0, { instant: true });
   updateMediaSession();
   requestWakeLock();
+  avisarEstadoDoc(doc).catch(() => {});
 }
 
 function exitReader() {
