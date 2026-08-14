@@ -2,7 +2,7 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=18";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=19";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -48,17 +48,131 @@ const LIGADURAS = {
   "\u017F": "s",              // s larga de imprentas antiguas
 };
 
+/* Huecos que deja un PDF mal generado: el nulo al que algunos ToUnicode
+   mandan sus glifos, el area privada sin equivalencia y el signo de
+   reemplazo. NO se borran aqui: primero se intenta deducir que letra eran
+   (ver deducirGlifos); lo que quede sin resolver lo quita limpiarRestos. */
+const RE_HUECO_G = /[\u0000\uE000-\uF8FF\uFFFD]/g;
+const RE_HUECO = /[\u0000\uE000-\uF8FF\uFFFD]/;   // sin /g: .test() no mueve lastIndex
+const RE_LETRA = /[A-Za-z\u00C0-\u024F]/;
+
 function normalizeAccents(text) {
   return text
     .replace(/[\uFB00-\uFB06\u0132\u0133\u0152\u0153\u00C6\u00E6\uF001\uF002\u017F]/g, (c) => LIGADURAS[c] ?? c)
     .replace(/\u0131/g, "i")          // i sin punto (turca) -> i
     .replace(/\u0237/g, "j")          // j sin punto -> j
-    // Restos de mapas rotos y anchos invisibles: nulos y otros controles,
-    // area privada sin equivalencia, signo de reemplazo y espacios de ancho
-    // cero. En pantalla dejan huecos y la voz tropieza con ellos.
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uE000-\uF8FF\uFFFD\u200B-\u200D\u2060\uFEFF]/g, "")
+    // Controles y anchos invisibles: no aportan nada y hacen tropezar a la
+    // voz. Los huecos de glifo se conservan hasta intentar identificarlos.
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF]/g, "")
     .replace(/[\u00A0\u202F\u2007]/g, " ")
     .normalize("NFC");                // i + acento suelto -> i acentuada
+}
+
+/* Ultimo recorrido: se van los huecos que no se pudieron identificar y el
+   espacio sobrante que dejan al desaparecer. */
+function limpiarRestos(text) {
+  return text.replace(RE_HUECO_G, "").replace(/\s{2,}/g, " ").trim();
+}
+
+/* ---- identificar los glifos que el PDF entrega rotos ----
+
+   Algunos PDF traen la capa de texto ya sin la letra: el generador manda
+   ciertos glifos a U+0000 (o al area privada) y no queda ni nombre de glifo
+   ni entrada en el cmap de la fuente. El caso corriente es la "f" recortada
+   que las imprentas usan delante de i o de l -- por eso "final" llega como
+   un hueco y "inal", y "beneficios" como "bene" y "icios".
+
+   No se adivina la letra: se deduce del propio documento. Se juntan TODAS
+   las apariciones del mismo hueco, se prueban los candidatos tipograficos
+   posibles y gana el que explique la evidencia: que letra le sigue siempre
+   y cuantas palabras reconstruidas ya existen bien escritas en el libro. Si
+   ninguno convence, no se toca el texto y se avisa al lector. */
+
+const CANDIDATOS = ["f", "fi", "fl", "ff", "ffi", "ffl", "ft"];
+
+/* Recorta la palabra a la que pertenece el hueco. El hueco ocupa el lugar
+   exacto de la letra: no se tocan los espacios de alrededor, que son
+   separaciones de verdad ("destino ?inal" es "destino final", no
+   "destinofinal"). */
+function palabraEn(texto, pos) {
+  let ini = pos - 1;
+  while (ini >= 0 && RE_LETRA.test(texto[ini])) ini--;
+  let fin = pos + 1;
+  while (fin < texto.length && RE_LETRA.test(texto[fin])) fin++;
+  return { antes: texto.slice(ini + 1, pos), despues: texto.slice(pos + 1, fin) };
+}
+
+function deducirGlifos(textos) {
+  const lexico = new Set();
+  const casos = new Map();          // codigo -> [{antes, despues}]
+  for (const texto of textos) {
+    for (const palabra of texto.split(/\s+/)) {
+      if (palabra && !RE_HUECO.test(palabra)) {
+        lexico.add(palabra.toLowerCase().replace(/[^\w\u00C0-\u024F]/g, ""));
+      }
+    }
+    let m;
+    RE_HUECO_G.lastIndex = 0;
+    while ((m = RE_HUECO_G.exec(texto)) !== null) {
+      const ctx = palabraEn(texto, m.index);
+      if (!ctx.antes && !ctx.despues) continue;      // hueco suelto: no es una letra
+      const cod = m[0];
+      if (!casos.has(cod)) casos.set(cod, []);
+      casos.get(cod).push(ctx);
+    }
+  }
+
+  const mapa = new Map();
+  const informe = [];
+  for (const [cod, lista] of casos) {
+    if (lista.length < 2) continue;                 // sin evidencia suficiente
+    // Evidencia 1: la letra que sigue. La "f" de ligadura solo aparece
+    // delante de i o de l; una ligadura entera (fi, fl) nunca las lleva.
+    const seguidasDeIL = lista.filter((c) => /^[il]/i.test(c.despues)).length;
+    const fraccionIL = seguidasDeIL / lista.length;
+    // Evidencia 2: cuantas palabras reconstruidas ya existen en el libro.
+    let mejor = null;
+    for (const cand of CANDIDATOS) {
+      if (cand !== "f" && fraccionIL > 0.5) continue;   // incompatible con la evidencia 1
+      if (cand === "f" && fraccionIL < 0.5) continue;
+      let aciertos = 0;
+      for (const c of lista) {
+        const palabra = (c.antes + cand + c.despues).toLowerCase();
+        if (lexico.has(palabra)) aciertos++;
+      }
+      const punt = aciertos / lista.length;
+      if (!mejor || punt > mejor.punt) mejor = { cand, punt, aciertos };
+    }
+    if (!mejor) continue;
+    // Se acepta si el contexto es concluyente (evidencia 1) o si el libro
+    // confirma bastantes reconstrucciones (evidencia 2).
+    const concluyente = fraccionIL >= 0.85 && mejor.cand === "f";
+    if (concluyente || mejor.punt >= 0.25) {
+      // Se guarda tambien la condicion que justifica la letra: la f de
+      // ligadura solo existe delante de i o de l.
+      mapa.set(cod, { letra: mejor.cand, exigeIL: mejor.cand === "f" });
+      informe.push({
+        codigo: "U+" + cod.codePointAt(0).toString(16).toUpperCase().padStart(4, "0"),
+        letra: mejor.cand, casos: lista.length,
+        porContexto: Math.round(fraccionIL * 100), porLexico: Math.round(mejor.punt * 100),
+      });
+    }
+  }
+  return { mapa, informe };
+}
+
+/* Aplica la deduccion hueco por hueco. Cada pagina incrusta su propio
+   subconjunto de fuente, asi que dos glifos distintos pueden acabar en el
+   mismo U+0000: la letra solo se pone donde el contexto la respalda, y si no
+   se deja el hueco (que luego se retira) antes que inventar una letra. */
+function aplicarGlifos(texto, mapa) {
+  if (!mapa.size) return texto;
+  return texto.replace(RE_HUECO_G, (c, pos) => {
+    const regla = mapa.get(c);
+    if (!regla) return c;
+    if (regla.exigeIL && !/[il]/i.test(texto[pos + 1] || "")) return c;
+    return regla.letra;
+  });
 }
 
 function cleanBlock(text) {
@@ -346,9 +460,6 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     // Sin la normalización de pdf.js (pensada para buscar, no para leer):
     // es la que parte los acentos y deshace ligaduras perdiendo letras.
     const content = await page.getTextContent({ disableNormalization: true });
-    for (const it of content.items) {
-      if (it.str) contarDanos(it.str, danos);
-    }
     const pageHeight = page.getViewport({ scale: 1 }).height;
     const lines = linesFromItems(content.items);
     for (const block of blocksFromLines(lines, p, pageHeight)) {
@@ -364,7 +475,16 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     if (count > bestCount) { bestCount = count; bodySize = size; }
   }
 
-  const blocks = joinContinuations(rawBlocks);
+  // Con el libro entero a la vista ya se puede deducir qué letra era cada
+  // hueco; lo que no se identifique se cuenta como daño y se retira.
+  const { mapa: mapaGlifos, informe: reparaciones } = deducirGlifos(rawBlocks.map((b) => b.text));
+  for (const b of rawBlocks) {
+    const conLetras = aplicarGlifos(b.text, mapaGlifos);
+    contarDanos(conLetras, danos);
+    b.text = limpiarRestos(conLetras);
+  }
+
+  const blocks = joinContinuations(rawBlocks).filter((b) => b.text.length >= MIN_SEGMENT_CHARS);
 
   const segments = [];
   const heuristicChapters = [];
@@ -413,5 +533,6 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     lang: docLang,
     motor: MOTOR_EXTRACCION,
     ...(totalDanos ? { danos } : {}),
+    ...(reparaciones.length ? { reparaciones } : {}),
   };
 }

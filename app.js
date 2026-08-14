@@ -2,14 +2,14 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=18";
-import { splitSentences } from "./sentences.js?v=18";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=19";
+import { splitSentences } from "./sentences.js?v=19";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut,
-} from "./storage.js?v=18";
+} from "./storage.js?v=19";
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,8 +17,27 @@ const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-fl
 const UNAVAILABLE_HINTS = ["not available", "not found", "deprecated", "does not exist", "no longer"];
 const geminiBadModels = new Set();
 
-const MAX_SPEED = 1.5;
+const MAX_SPEED = 2.0;
 const LONG_PRESS_MS = 480;
+
+/* Calibracion del ritmo de lectura.
+
+   A 1,00x el motor va un punto por encima de su velocidad neutra: ahi es
+   donde una lectura en voz alta suena como la de una persona y no como un
+   dictado. Por encima de TOPE_MOTOR el motor empieza a comerse la
+   articulacion y las pausas, asi que el resto de la aceleracion se consigue
+   acelerando el audio ya generado con el tono corregido, que a esas
+   velocidades se entiende bastante mejor. */
+const RITMO_NATURAL = 1.10;
+const TOPE_MOTOR = 1.6;
+
+function repartoVelocidad(v = state.settings.speed) {
+  const objetivo = v <= 1
+    ? v * RITMO_NATURAL
+    : RITMO_NATURAL + (v - 1) * (MAX_SPEED - RITMO_NATURAL);
+  const motor = Math.round(Math.min(TOPE_MOTOR, objetivo) * 100) / 100;
+  return { motor, reproductor: Math.round((objetivo / motor) * 1000) / 1000, total: objetivo };
+}
 
 const TEMAS = [
   { id: "kindle", name: "Kindle", bg: "#000000", fg: "#FFFFFF" },
@@ -51,7 +70,11 @@ const state = {
   highlights: {},
   playing: false,
   engine: "neural",       // "neural" (motor) | "device" (voz del sistema)
-  audio: new Audio(),
+  audio: null,            // reproductor en curso
+  relevo: null,           // el que va cargando el parrafo siguiente
+  relevoPara: -1,
+  relevoKey: "",
+  relevoWords: null,
   clips: new Map(),       // "parrafo|voz|velocidad" -> Promise<{url, words}>
   words: [],              // {c, el} del párrafo en curso
   timings: [],            // tiempos que devuelve el motor
@@ -67,8 +90,29 @@ const state = {
   pick: null,             // oración con el menú de subrayado abierto
 };
 
-state.audio.setAttribute("playsinline", "");
-state.audio.preload = "auto";
+/* Dos reproductores que se turnan. Cambiar el src de un <audio> obliga al
+   navegador a cargar y decodificar el audio otra vez, y ese trabajo era
+   justo el silencio que se notaba al pasar de un parrafo al siguiente. Con
+   el relevo ya cargado, el cambio es inmediato. */
+function crearAudio() {
+  const a = new Audio();
+  a.setAttribute("playsinline", "");
+  a.preload = "auto";
+  a.addEventListener("timeupdate", () => {
+    if (state.playing && state.audio === a) syncKaraoke();
+  });
+  a.addEventListener("ended", () => { if (state.audio === a) alTerminarParrafo(); });
+  return a;
+}
+state.audio = crearAudio();
+state.relevo = crearAudio();
+
+/* Cualquier cambio de voz o de velocidad deja el relevo obsoleto. */
+function descartarRelevo() {
+  state.relevoPara = -1;
+  state.relevoKey = "";
+  state.relevoWords = null;
+}
 
 /* ---------- avisos ---------- */
 
@@ -100,8 +144,12 @@ function applyDisplaySettings() {
 }
 
 function saveSettings(patch) {
+  const antes = `${state.settings.speed}|${state.settings.voice_es}|${state.settings.voice_en}`;
   Object.assign(state.settings, patch);
   if (state.settings.speed > MAX_SPEED) state.settings.speed = MAX_SPEED;
+  if (`${state.settings.speed}|${state.settings.voice_es}|${state.settings.voice_en}` !== antes) {
+    descartarRelevo();
+  }
   applyDisplaySettings();
   persistSettings(state.settings);
 }
@@ -279,6 +327,9 @@ async function enterReader(doc, position) {
   updateMediaSession();
   requestWakeLock();
   avisarEstadoDoc(doc).catch(() => {});
+  // Se va pidiendo el audio de donde quedó la lectura: así el primer toque
+  // en Leer no espera a la red (y de paso despierta el motor si dormía).
+  if (usaNeural()) fetchPara(state.para).catch(() => {});
 }
 
 function exitReader() {
@@ -371,11 +422,11 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
 const ANCLA = 0.25;
 const UMBRAL = 0.66;
 
-function mantenerALaVista({ instant = false, parrafoNuevo = false } = {}) {
+function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = false } = {}) {
   const modo = state.settings.scrollMode || "auto";
-  if (modo === "manual") return;
-  if (modo === "parrafo" && !parrafoNuevo) return;
-  if (!instant && Date.now() - state.userScrolledAt < 4000) return;
+  if (modo === "manual" && !forzar) return;
+  if (modo === "parrafo" && !parrafoNuevo && !forzar) return;
+  if (!instant && !forzar && Date.now() - state.userScrolledAt < 4000) return;
 
   const stage = $("stage");
   const el = segEl(state.para)?.querySelector(".sn.active") || segEl(state.para);
@@ -384,7 +435,9 @@ function mantenerALaVista({ instant = false, parrafoNuevo = false } = {}) {
   const zona = stage.getBoundingClientRect();
   const linea = el.getBoundingClientRect();
   const posicion = (linea.top - zona.top) / zona.height;
-  if (modo === "auto" && posicion >= 0 && posicion < UMBRAL) return;   // aún bien visible
+  // Al arrancar la lectura se lleva siempre al ancla, aunque ya se viera:
+  // es lo que hace que el texto quede donde la voz va leyendo.
+  if (!forzar && modo === "auto" && posicion >= 0 && posicion < UMBRAL) return;
 
   const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ANCLA;
   stage.scrollTo({ top: Math.max(0, destino), behavior: instant ? "auto" : "smooth" });
@@ -412,7 +465,9 @@ function markSentence(k, { force = false } = {}) {
 
 /* ---------- motor neuronal: un audio por párrafo ---------- */
 
-const clipKey = (i) => `${i}|${voiceForPara(i)}|${state.settings.speed}`;
+// La clave lleva la velocidad del MOTOR: dos velocidades que comparten
+// audio (y solo cambian el ritmo del reproductor) reaprovechan el clip.
+const clipKey = (i) => `${i}|${voiceForPara(i)}|${repartoVelocidad().motor}`;
 
 function fetchPara(i) {
   const key = clipKey(i);
@@ -427,7 +482,7 @@ function fetchPara(i) {
     body: JSON.stringify({
       text: paraVoz,
       voice: voiceForPara(i),
-      speed: Math.min(MAX_SPEED, state.settings.speed),
+      speed: repartoVelocidad().motor,
     }),
   }).then(async (res) => {
     if (!res.ok) {
@@ -519,7 +574,7 @@ function abrirExportador() {
   if (!state.doc) return;
   if (!engineUrl()) { toast("Configura el motor de voz en Ajustes para exportar.", true); return; }
   const total = state.doc.segments.reduce((a, s) => a + s.text.length, 0);
-  const cps = (state.cps || CPS_INICIAL) * Math.min(MAX_SPEED, state.settings.speed);
+  const cps = (state.cps || CPS_INICIAL) * repartoVelocidad().total;
   const voz = voiceById(voiceForPara(0));
   $("exportTitle").textContent = "Exportar en MP3";
   $("exportInfo").textContent =
@@ -549,7 +604,7 @@ async function pedirAudioParrafo(i) {
     body: JSON.stringify({
       text: texto,
       voice: voiceForPara(i),
-      speed: Math.min(MAX_SPEED, state.settings.speed),
+      speed: repartoVelocidad().motor,
     }),
   });
   if (!res.ok) throw new Error(`el motor respondió ${res.status}`);
@@ -625,7 +680,7 @@ const CPS_INICIAL = 15;
 
 function calibrarRitmo(caracteres, segundos) {
   if (!segundos || caracteres < 40) return;
-  const cps = caracteres / segundos / Math.min(MAX_SPEED, state.settings.speed);
+  const cps = caracteres / segundos / repartoVelocidad().motor;
   state.cps = state.cps ? state.cps * 0.7 + cps * 0.3 : cps;   // media suavizada
 }
 
@@ -660,7 +715,7 @@ function updateTimeLeft() {
   const el = $("timeLeft");
   if (!el) return;
   if (!state.doc) { el.textContent = ""; return; }
-  const cps = (state.cps || CPS_INICIAL) * Math.min(MAX_SPEED, state.settings.speed);
+  const cps = (state.cps || CPS_INICIAL) * repartoVelocidad().total;
   el.textContent = formatoTiempo(caracteresRestantes() / cps);
   el.title = "Tiempo restante del documento";
 }
@@ -678,7 +733,19 @@ function stopClock() {
 /* Con el siguiente párrafo ya descargado, la lectura no se corta ni con la
    pantalla bloqueada, donde el navegador apenas deja trabajar en segundo plano. */
 function prefetchNext(i) {
-  if (i + 1 < state.doc.segments.length) fetchPara(i + 1).catch(() => {});
+  const sig = i + 1;
+  if (!state.doc || sig >= state.doc.segments.length) return;
+  const clave = clipKey(sig);
+  fetchPara(sig).then(({ url, words }) => {
+    // Entre la peticion y la respuesta el lector pudo moverse o cambiar de
+    // voz: solo se prepara el relevo si sigue siendo el parrafo siguiente.
+    if (state.para !== i || clipKey(sig) !== clave) return;
+    state.relevo.src = url;
+    state.relevo.load();
+    state.relevoPara = sig;
+    state.relevoKey = clave;
+    state.relevoWords = words;
+  }).catch(() => {});
 }
 
 function syncKaraoke() {
@@ -734,7 +801,9 @@ async function playNeural(seekSent = null) {
     state.timings = words;
     state.litIdx = -1;
     if (state.audio.src !== url) state.audio.src = url;
-    state.audio.playbackRate = 1;
+    const { reproductor } = repartoVelocidad();
+    state.audio.preservesPitch = true;
+    state.audio.playbackRate = reproductor;
     if (seekSent !== null) {
       await new Promise((r) => {
         if (state.audio.readyState >= 1) return r();
@@ -753,6 +822,8 @@ async function playNeural(seekSent = null) {
     requestWakeLock();
     updateMediaSession();
     startSync();
+    // La lectura empieza: el texto se coloca donde la voz va leyendo.
+    mantenerALaVista({ instant: true, forzar: true });
     prefetchNext(i);
   } catch (err) {
     if (token !== state.token) return;
@@ -769,15 +840,41 @@ async function playNeural(seekSent = null) {
   }
 }
 
-state.audio.addEventListener("ended", () => {
+function alTerminarParrafo() {
   if (!state.playing || state.engine !== "neural") return;
-  if (state.para + 1 < state.doc.segments.length) {
-    setCurrent(state.para + 1, 0);
-    playNeural();
-  } else {
-    finishDocument();
+  const sig = state.para + 1;
+  if (sig >= state.doc.segments.length) { finishDocument(); return; }
+
+  // Si el relevo ya trae cargado el parrafo siguiente, se cambia de
+  // reproductor y la voz sigue sin silencio de por medio.
+  const listo = state.relevoPara === sig
+    && state.relevoKey === clipKey(sig)
+    && state.relevo.readyState >= 2;
+  if (listo) {
+    const anterior = state.audio;
+    state.audio = state.relevo;
+    state.relevo = anterior;
+    state.timings = state.relevoWords || [];
+    descartarRelevo();
+    state.litIdx = -1;
+    state.token++;
+    const { reproductor } = repartoVelocidad();
+    state.audio.preservesPitch = true;
+    state.audio.playbackRate = reproductor;
+    try { state.audio.currentTime = 0; } catch { /* aún sin metadatos */ }
+    setCurrent(sig, 0);
+    state.audio.play().then(() => {
+      state.playing = true;
+      setPlayUI("playing");
+      startSync();
+      updateMediaSession();
+      prefetchNext(sig);
+    }).catch(() => { setCurrent(sig, 0); playNeural(); });
+    return;
   }
-});
+  setCurrent(sig, 0);
+  playNeural();
+}
 
 /* ---------- respaldo: voz del dispositivo ---------- */
 
@@ -792,7 +889,7 @@ function speakDevice() {
   const { texto: paraVoz, mapa } = prepararTextoVoz(texto);
   const u = new SpeechSynthesisUtterance(paraVoz);
   if (voz) { u.voice = voz; u.lang = voz.lang; }
-  u.rate = Math.min(MAX_SPEED, state.settings.speed);
+  u.rate = Math.min(MAX_SPEED, repartoVelocidad().total);
   u.onboundary = (e) => {
     if (token !== state.token || typeof e.charIndex !== "number") return;
     const abs = s.cs + (mapa ? (mapa[e.charIndex] ?? e.charIndex) : e.charIndex);
@@ -865,8 +962,10 @@ function togglePlay() {
 }
 
 /* Salto a una oración: con el motor es instantáneo, sin volver a pedir audio. */
-function goToSentence(para, sent) {
-  const sonando = state.playing;
+/* Tocar una oracion lleva la lectura ahi y la arranca: no hace falta un
+   segundo toque en Leer. */
+function goToSentence(para, sent, { arrancar = true } = {}) {
+  const sonando = state.playing || arrancar;
   const mismoParrafo = para === state.para;
   state.token++;
   window.speechSynthesis?.cancel();
@@ -879,13 +978,22 @@ function goToSentence(para, sent) {
     markSentence(sent, { force: true });
     state.audio.currentTime = timeOfSentence(sent);
     state.litIdx = -1;
-    if (sonando) { state.token++; state.playing = true; state.audio.play().catch(() => {}); startSync(); }
+    if (sonando) {
+      state.token++;
+      state.playing = true;
+      startClock();
+      state.audio.play().catch(() => {});
+      startSync();
+      setPlayUI("playing");
+    }
+    mantenerALaVista({ instant: true, forzar: true });
     return;
   }
   state.audio.pause();
   setCurrent(para, sent);
   if (sonando) play(sent);
   else { state.playing = false; setPlayUI("paused"); }
+  mantenerALaVista({ instant: true, forzar: true });
 }
 
 function goToPara(i) {
