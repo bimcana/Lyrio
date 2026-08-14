@@ -2,13 +2,13 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=12";
-import { splitSentences } from "./sentences.js?v=12";
+import { extractFromPdf } from "./extract.js?v=15";
+import { splitSentences } from "./sentences.js?v=15";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=12";
+} from "./storage.js?v=15";
 
 const $ = (id) => document.getElementById(id);
 
@@ -397,11 +397,12 @@ function fetchPara(i) {
   const base = engineUrl();
   if (!base) return Promise.reject(new Error("Configura el motor de voz en Ajustes."));
 
+  const { texto: paraVoz, mapa } = prepararTextoVoz(state.doc.segments[i].text);
   const promise = fetch(`${base}/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      text: state.doc.segments[i].text,
+      text: paraVoz,
       voice: voiceForPara(i),
       speed: Math.min(MAX_SPEED, state.settings.speed),
     }),
@@ -413,7 +414,12 @@ function fetchPara(i) {
     }
     const data = await res.json();
     const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
-    return { url: URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })), words: data.words };
+    // El MP3 es de tasa constante: la duración sale exacta del tamaño.
+    calibrarRitmo(state.doc.segments[i].text.length, (bytes.length * 8) / 48000);
+    return {
+      url: URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })),
+      words: reubicarPalabras(data.words, mapa),
+    };
   }).catch((err) => {
     if (err instanceof TypeError) throw new Error("No se pudo contactar el motor de voz (¿hay internet?)");
     throw err;
@@ -428,6 +434,113 @@ function fetchPara(i) {
     p.then((r) => URL.revokeObjectURL(r.url)).catch(() => {});
   }
   return promise;
+}
+
+/* ---------- números ----------
+   Con punto como separador de miles ("1.500") el motor deletrea cifra por
+   cifra. Se le envía el número sin separadores ("1500"), que lee bien en
+   cualquier caso, conservando el decimal si lo hay. La pantalla no cambia:
+   los tiempos de palabra se traducen de vuelta al texto original. */
+
+function separadoresDeMiles(token) {
+  const seps = [];
+  for (let i = 0; i < token.length; i++) if (token[i] === "." || token[i] === ",") seps.push(i);
+  if (!seps.length) return [];
+  const partes = token.split(/[.,]/);
+  if (partes[0].length > 3) return [];                       // 12345.678 no es miles
+  const cola = partes.slice(1);
+  if (cola.every((p) => p.length === 3)) return seps;        // 1.234.567
+  const ultimo = cola[cola.length - 1];
+  if (ultimo.length <= 2 && cola.slice(0, -1).every((p) => p.length === 3)) {
+    return seps.slice(0, -1);                                // 1.234,56 -> el último es decimal
+  }
+  return [];                                                 // fechas, versiones, 1.5
+}
+
+function prepararTextoVoz(texto) {
+  const quitar = new Set();
+  const re = /\d[\d.,]*\d/g;
+  let m;
+  while ((m = re.exec(texto)) !== null) {
+    for (const p of separadoresDeMiles(m[0])) quitar.add(m.index + p);
+  }
+  if (!quitar.size) return { texto, mapa: null };
+  let salida = "";
+  const mapa = [];
+  for (let i = 0; i < texto.length; i++) {
+    if (quitar.has(i)) continue;
+    mapa.push(i);
+    salida += texto[i];
+  }
+  return { texto: salida, mapa };
+}
+
+/* Devuelve los tiempos con las posiciones referidas al texto que se ve. */
+function reubicarPalabras(palabras, mapa) {
+  if (!mapa) return palabras;
+  return palabras.map((p) => ({
+    ...p,
+    cs: mapa[p.cs] ?? p.cs,
+    ce: (mapa[p.ce - 1] ?? p.ce - 1) + 1,
+  }));
+}
+
+/* ---------- tiempo restante ----------
+   El ritmo se aprende de los párrafos ya generados (caracteres por segundo a
+   velocidad 1) y con él se estima lo que falta del documento. */
+
+const CPS_INICIAL = 15;
+
+function calibrarRitmo(caracteres, segundos) {
+  if (!segundos || caracteres < 40) return;
+  const cps = caracteres / segundos / Math.min(MAX_SPEED, state.settings.speed);
+  state.cps = state.cps ? state.cps * 0.7 + cps * 0.3 : cps;   // media suavizada
+}
+
+function caracteresRestantes() {
+  if (!state.doc) return 0;
+  const segs = state.doc.segments;
+  let total = 0;
+  for (let i = state.para + 1; i < segs.length; i++) total += segs[i].text.length;
+
+  // Del párrafo en curso, solo lo que queda por leer.
+  const actual = segs[state.para].text;
+  if (state.engine === "neural" && state.audio.duration > 0) {
+    const avance = state.audio.currentTime / state.audio.duration;
+    total += actual.length * (1 - Math.min(1, avance));
+  } else {
+    const s = sentencesFor(state.para)[state.sent];
+    total += actual.length - (s ? s.cs : 0);
+  }
+  return total;
+}
+
+function formatoTiempo(segundos) {
+  const t = Math.max(0, Math.round(segundos));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const dosCifras = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${dosCifras(m)}:${dosCifras(s)}` : `${m}:${dosCifras(s)}`;
+}
+
+function updateTimeLeft() {
+  const el = $("timeLeft");
+  if (!el) return;
+  if (!state.doc) { el.textContent = ""; return; }
+  const cps = (state.cps || CPS_INICIAL) * Math.min(MAX_SPEED, state.settings.speed);
+  el.textContent = formatoTiempo(caracteresRestantes() / cps);
+  el.title = "Tiempo restante del documento";
+}
+
+let relojRestante = 0;
+function startClock() {
+  clearInterval(relojRestante);
+  relojRestante = setInterval(updateTimeLeft, 1000);
+}
+function stopClock() {
+  clearInterval(relojRestante);
+  updateTimeLeft();
 }
 
 /* Con el siguiente párrafo ya descargado, la lectura no se corta ni con la
@@ -544,12 +657,13 @@ function speakDevice() {
   const texto = sentenceText(state.para, state.sent);
   const voz = bestDeviceVoice(paraLang(state.para));
 
-  const u = new SpeechSynthesisUtterance(texto);
+  const { texto: paraVoz, mapa } = prepararTextoVoz(texto);
+  const u = new SpeechSynthesisUtterance(paraVoz);
   if (voz) { u.voice = voz; u.lang = voz.lang; }
   u.rate = Math.min(MAX_SPEED, state.settings.speed);
   u.onboundary = (e) => {
     if (token !== state.token || typeof e.charIndex !== "number") return;
-    const abs = s.cs + e.charIndex;
+    const abs = s.cs + (mapa ? (mapa[e.charIndex] ?? e.charIndex) : e.charIndex);
     let lit = -1;
     for (let i = 0; i < state.words.length; i++) {
       if (state.words[i].c <= abs) lit = i; else break;
@@ -589,6 +703,7 @@ function usaNeural() {
 
 function play(seekSent = null) {
   $("endCap").classList.add("hidden");
+  startClock();
   if (usaNeural()) playNeural(seekSent);
   else speakDevice();
 }
@@ -596,6 +711,7 @@ function play(seekSent = null) {
 function stopPlayback() {
   state.token++;
   state.playing = false;
+  stopClock();
   cancelAnimationFrame(state.raf);
   clearInterval(keepAlive);
   state.audio.pause();
@@ -880,6 +996,7 @@ function updateChips() {
   $("chipSpeed").textContent = `${state.settings.speed.toFixed(2).replace(/0$/, "")}×`;
   const t = state.translation;
   $("chipTranslate").classList.toggle("active", Boolean(t && t.para === state.para && t.sent === state.sent));
+  updateTimeLeft();
 }
 
 function closePopovers() {
@@ -1244,5 +1361,5 @@ window.lyrio = {
   state, uploadFile, goToSentence, goToPara, togglePlay, stopPlayback, setImmersive,
   openChapters, saveSettings, exitReader, openSheet, closeSheet, togglePopover,
   translateCurrentSentence, sentencesFor, renderVoicePicker, showHlMenu, hideHlMenu,
-  setHighlight, loadVoiceCatalog,
+  setHighlight, loadVoiceCatalog, prepararTextoVoz, updateTimeLeft,
 };
