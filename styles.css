@@ -587,6 +587,35 @@ input[type="range"] { width: 100%; accent-color: var(--lamp); height: 30px; }
 .chapter-item.active .ch-n { color: var(--lamp-deep); }
 .chapter-item .ch-t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ============ EXPORTAR MP3 ============ */
+
+#exportPanel {
+  position: fixed; z-index: 60;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px 22px 16px;
+  background: var(--bg-sheet);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.5);
+  animation: pop-in 0.2s ease;
+}
+#exportPanel h3 {
+  font-family: var(--font-display);
+  font-size: 19px; font-weight: 600; color: var(--ink-live);
+  margin-bottom: 8px;
+}
+#exportBar {
+  height: 5px; border-radius: 3px; background: var(--line);
+  overflow: hidden; margin: 14px 0 16px;
+}
+#exportFill { height: 100%; width: 0; background: var(--lamp); border-radius: 3px; transition: width 0.3s; }
+.export-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.chip.primary {
+  background: var(--lamp); border-color: var(--lamp); color: var(--on-lamp); font-weight: 600;
+}
+.chip.primary:hover { color: var(--on-lamp); filter: brightness(1.06); }
+
 #toast {
   position: fixed; z-index: 70;
   left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);

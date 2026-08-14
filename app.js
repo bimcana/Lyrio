@@ -2,13 +2,13 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf } from "./extract.js?v=15";
-import { splitSentences } from "./sentences.js?v=15";
+import { extractFromPdf } from "./extract.js?v=16";
+import { splitSentences } from "./sentences.js?v=16";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-} from "./storage.js?v=15";
+} from "./storage.js?v=16";
 
 const $ = (id) => document.getElementById(id);
 
@@ -483,6 +483,115 @@ function reubicarPalabras(palabras, mapa) {
     cs: mapa[p.cs] ?? p.cs,
     ce: (mapa[p.ce - 1] ?? p.ce - 1) + 1,
   }));
+}
+
+/* ---------- exportar a MP3 ----------
+   Los MP3 del motor son de tasa constante y del mismo codificador, así que
+   basta encadenarlos para obtener un solo archivo continuo. */
+
+let exportando = false;
+let cancelarExport = false;
+
+function abrirExportador() {
+  if (!state.doc) return;
+  if (!engineUrl()) { toast("Configura el motor de voz en Ajustes para exportar.", true); return; }
+  const total = state.doc.segments.reduce((a, s) => a + s.text.length, 0);
+  const cps = (state.cps || CPS_INICIAL) * Math.min(MAX_SPEED, state.settings.speed);
+  const voz = voiceById(voiceForPara(0));
+  $("exportTitle").textContent = "Exportar en MP3";
+  $("exportInfo").textContent =
+    `${state.doc.title} · unos ${formatoTiempo(total / cps)} de audio con la voz de ` +
+    `${voz ? nombreVoz(voz) : "el documento"}. La preparación tarda un rato y necesita conexión; ` +
+    "puedes cancelarla cuando quieras.";
+  $("exportFill").style.width = "0";
+  $("exportStart").classList.remove("hidden");
+  $("exportCancel").textContent = "Cancelar";
+  $("exportPanel").classList.remove("hidden");
+  $("sheetBackdrop").classList.remove("hidden");
+}
+
+function cerrarExportador() {
+  cancelarExport = true;
+  $("exportPanel").classList.add("hidden");
+  if ($("sheet").classList.contains("hidden") && $("chapterSheet").classList.contains("hidden")) {
+    $("sheetBackdrop").classList.add("hidden");
+  }
+}
+
+async function pedirAudioParrafo(i) {
+  const { texto } = prepararTextoVoz(state.doc.segments[i].text);
+  const res = await fetch(`${engineUrl()}/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: texto,
+      voice: voiceForPara(i),
+      speed: Math.min(MAX_SPEED, state.settings.speed),
+    }),
+  });
+  if (!res.ok) throw new Error(`el motor respondió ${res.status}`);
+  const data = await res.json();
+  return Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
+}
+
+async function exportarMP3() {
+  if (exportando) return;
+  exportando = true;
+  cancelarExport = false;
+  const segs = state.doc.segments;
+  const partes = new Array(segs.length);
+  let siguiente = 0, hechos = 0;
+
+  $("exportStart").classList.add("hidden");
+  const pintar = () => {
+    $("exportFill").style.width = `${(hechos / segs.length) * 100}%`;
+    $("exportTitle").textContent = `Preparando… ${hechos} de ${segs.length}`;
+  };
+  pintar();
+
+  // Tres peticiones a la vez; el índice mantiene el orden del libro.
+  const trabajador = async () => {
+    while (!cancelarExport) {
+      const i = siguiente++;
+      if (i >= segs.length) return;
+      partes[i] = await pedirAudioParrafo(i);
+      hechos++;
+      pintar();
+    }
+  };
+
+  try {
+    await Promise.all([trabajador(), trabajador(), trabajador()]);
+    if (cancelarExport) { toast("Exportación cancelada."); return; }
+    const blob = new Blob(partes.filter(Boolean), { type: "audio/mpeg" });
+    const nombre = `${state.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "Lyrio"}.mp3`;
+    await entregarArchivo(blob, nombre);
+  } catch (err) {
+    toast(`No se pudo exportar: ${err.message}`, true);
+  } finally {
+    exportando = false;
+    cerrarExportador();
+  }
+}
+
+/* En el móvil se ofrece compartir (Archivos, Libros…); en el escritorio, descargar. */
+async function entregarArchivo(blob, nombre) {
+  const file = new File([blob], nombre, { type: "audio/mpeg" });
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: nombre });
+      return;
+    } catch (err) {
+      if (err?.name === "AbortError") return;      // el usuario cerró el menú
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = nombre;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  toast("MP3 descargado.");
 }
 
 /* ---------- tiempo restante ----------
@@ -1230,6 +1339,9 @@ function wireEvents() {
   $("btnPlay").addEventListener("click", togglePlay);
   $("btnPrev").addEventListener("click", () => goToPara(state.para - 1));
   $("btnNext").addEventListener("click", () => goToPara(state.para + 1));
+  $("btnExport").addEventListener("click", abrirExportador);
+  $("exportStart").addEventListener("click", exportarMP3);
+  $("exportCancel").addEventListener("click", cerrarExportador);
   $("homeSettings").addEventListener("click", () => openSheet({ desdeInicio: true }));
   $("btnSettings").addEventListener("click", () => openSheet());
   $("btnSettings2").addEventListener("click", () => openSheet());
@@ -1362,4 +1474,5 @@ window.lyrio = {
   openChapters, saveSettings, exitReader, openSheet, closeSheet, togglePopover,
   translateCurrentSentence, sentencesFor, renderVoicePicker, showHlMenu, hideHlMenu,
   setHighlight, loadVoiceCatalog, prepararTextoVoz, updateTimeLeft,
+  abrirExportador, exportarMP3, cerrarExportador, entregarArchivo,
 };
