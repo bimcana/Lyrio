@@ -2,7 +2,7 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=19";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=20";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 

@@ -2,14 +2,14 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=19";
-import { splitSentences } from "./sentences.js?v=19";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=20";
+import { splitSentences } from "./sentences.js?v=20";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut,
-} from "./storage.js?v=19";
+} from "./storage.js?v=20";
 
 const $ = (id) => document.getElementById(id);
 
@@ -961,6 +961,23 @@ function togglePlay() {
   else play();
 }
 
+/* Cambia la velocidad desde el teclado. Hace lo mismo que mover el control:
+   guarda, refresca la interfaz y vuelve a pedir el audio si estaba sonando
+   (el clip generado ya no sirve para la velocidad nueva). */
+function cambiarVelocidad(paso) {
+  const antes = state.settings.speed;
+  const speed = Math.round(Math.min(MAX_SPEED, Math.max(0.5, antes + paso)) * 100) / 100;
+  if (speed === antes) return;
+  saveSettings({ speed });
+  const control = $("speedRange");
+  if (control) control.value = speed;
+  $("speedOut").textContent = `${speed.toFixed(2).replace(/0$/, "")}×`;
+  updateChips();
+  toast(`Velocidad ${speed.toFixed(2).replace(/0$/, "")}×`);
+  state.clips.clear();
+  if (state.playing) { state.token++; state.audio.pause(); play(state.sent); }
+}
+
 /* Salto a una oración: con el motor es instantáneo, sin volver a pedir audio. */
 /* Tocar una oracion lleva la lectura ahi y la arranca: no hace falta un
    segundo toque en Leer. */
@@ -1486,12 +1503,19 @@ function wireEvents() {
 
   /* lectura: toque en oración salta; mantener pulsado abre el menú de subrayado;
      toque en cualquier zona vacía muestra u oculta los controles */
-  let pressTimer = 0, pressed = null, moved = false;
+  let pressTimer = 0, pressed = null, moved = false, origen = null;
   const stage = $("stage");
+  /* Con el dedo el puntero solo se mueve mientras se toca la pantalla; con
+     raton o trackpad se mueve continuamente sin pulsar nada. Por eso no vale
+     con «hubo movimiento»: solo cuenta el que ocurre con el boton pulsado y
+     pasa de este umbral, que ademas absorbe el temblor del trackpad al hacer
+     clic. Sin esto, en el iPad con Magic Keyboard se perdian todos los toques. */
+  const UMBRAL_ARRASTRE = 10;
 
   const startPress = (e) => {
     const sn = e.target.closest?.(".sn");
     moved = false;
+    origen = { x: e.clientX, y: e.clientY };
     pressed = sn || null;
     clearTimeout(pressTimer);
     if (!sn || state.playing) return;
@@ -1499,10 +1523,15 @@ function wireEvents() {
     const s = Number(sn.dataset.s);
     pressTimer = setTimeout(() => { pressed = null; showHlMenu(sn, p, s); }, LONG_PRESS_MS);
   };
-  const cancelPress = () => { clearTimeout(pressTimer); };
+  const cancelPress = () => { clearTimeout(pressTimer); origen = null; };
 
   stage.addEventListener("pointerdown", startPress);
-  stage.addEventListener("pointermove", () => { moved = true; cancelPress(); });
+  stage.addEventListener("pointermove", (e) => {
+    if (!origen || e.buttons === 0) return;      // el cursor pasea, no arrastra
+    if (Math.hypot(e.clientX - origen.x, e.clientY - origen.y) < UMBRAL_ARRASTRE) return;
+    moved = true;
+    cancelPress();
+  });
   stage.addEventListener("pointerup", cancelPress);
   stage.addEventListener("pointercancel", cancelPress);
   stage.addEventListener("contextmenu", (e) => { if (e.target.closest(".sn")) e.preventDefault(); });
@@ -1578,13 +1607,46 @@ function wireEvents() {
     $("keyStatus").textContent = key ? "✓ Clave guardada" : "Clave eliminada";
   });
 
+  /* Teclado. Las flechas cambian de parrafo y con Mayus de oracion; la
+     navegacion conserva el estado (si estaba en pausa, sigue en pausa), a
+     diferencia del toque en una oracion, que si arranca la lectura. */
+  function saltarOracion(paso) {
+    const total = sentencesFor(state.para).length;
+    const destino = state.sent + paso;
+    if (destino >= 0 && destino < total) {
+      goToSentence(state.para, destino, { arrancar: false });
+    } else if (paso > 0) {
+      goToPara(state.para + 1);
+    } else if (state.para > 0) {
+      const previo = state.para - 1;
+      goToSentence(previo, Math.max(0, sentencesFor(previo).length - 1), { arrancar: false });
+    }
+  }
+
   document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    // Escape cierra tambien desde el inicio, donde hay hoja de ajustes.
+    if (e.key === "Escape") { closeSheet(); closePopovers(); hideHlMenu(); return; }
     if ($("reader").classList.contains("hidden")) return;
-    if (e.target.tagName === "INPUT") return;
-    if (e.code === "Space") { e.preventDefault(); togglePlay(); }
-    if (e.code === "ArrowRight") goToPara(state.para + 1);
-    if (e.code === "ArrowLeft") goToPara(state.para - 1);
-    if (e.code === "Escape") { closeSheet(); closePopovers(); hideHlMenu(); }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;   // no pisar los atajos del sistema
+
+    switch (e.key) {
+      case " ":
+        e.preventDefault(); togglePlay(); break;
+      case "ArrowRight":
+        e.preventDefault();
+        if (e.shiftKey) saltarOracion(1); else goToPara(state.para + 1);
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        if (e.shiftKey) saltarOracion(-1); else goToPara(state.para - 1);
+        break;
+      case "+": case "=":
+        e.preventDefault(); cambiarVelocidad(0.05); break;
+      case "-": case "_":
+        e.preventDefault(); cambiarVelocidad(-0.05); break;
+      default: break;
+    }
   });
 }
 
