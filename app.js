@@ -2,14 +2,14 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=20";
-import { splitSentences } from "./sentences.js?v=20";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=21";
+import { splitSentences } from "./sentences.js?v=21";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut,
-} from "./storage.js?v=20";
+} from "./storage.js?v=21";
 
 const $ = (id) => document.getElementById(id);
 
@@ -324,6 +324,12 @@ async function enterReader(doc, position) {
   }
   updateChips();
   setCurrent(state.para, 0, { instant: true });
+  // Las tipografias web pueden entrar despues de calcular la posicion: al
+  // cambiar el ancho de la letra el texto se recompone y el punto de lectura
+  // se desplaza. Se vuelve a anclar una vez, ya con las fuentes definitivas.
+  document.fonts?.ready?.then(() => {
+    if (state.doc === doc) mantenerALaVista({ instant: true, forzar: true });
+  }).catch(() => {});
   updateMediaSession();
   requestWakeLock();
   avisarEstadoDoc(doc).catch(() => {});
@@ -440,7 +446,11 @@ function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = fals
   if (!forzar && modo === "auto" && posicion >= 0 && posicion < UMBRAL) return;
 
   const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ANCLA;
-  stage.scrollTo({ top: Math.max(0, destino), behavior: instant ? "auto" : "smooth" });
+  // OJO: "auto" no significa instantaneo, significa «lo que diga el CSS», y el
+  // CSS de #stage pide scroll-behavior: smooth. Para saltar de verdad hay que
+  // pedir "instant"; con "auto" el salto al abrir un libro no llegaba a
+  // ejecutarse y la lectura aparecia siempre al principio.
+  stage.scrollTo({ top: Math.max(0, destino), behavior: instant ? "instant" : "smooth" });
 }
 
 /* Marca la oración en curso sin volver a dibujar el párrafo entero. */
