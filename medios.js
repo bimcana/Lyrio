@@ -5,8 +5,8 @@
    sería agotar la memoria del teléfono para enseñar tres. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=22";
-import { obtenerArchivo } from "./storage.js?v=22";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=23";
+import { obtenerArchivo } from "./storage.js?v=23";
 
 const MAX_CACHE = 30;
 const cache = new Map();          // "idDoc|k" -> objectURL
@@ -93,7 +93,7 @@ async function sacarDelPdf(doc, ref) {
 /* En el EPUB la imagen ya es un archivo: basta con sacarla del ZIP. */
 async function sacarDelEpub(doc, ref) {
   if (zipAbierto?.id !== doc.id) {
-    const { leerZip } = await import("./epub.js?v=22");
+    const { leerZip } = await import("./epub.js?v=23");
     zipAbierto = { id: doc.id, entradas: await leerZip(await archivoDe(doc)) };
   }
   const bytes = zipAbierto.entradas.get(ref.ruta);

@@ -2,15 +2,16 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=22";
-import { resolverImagen, liberarMedios } from "./medios.js?v=22";
-import { splitSentences } from "./sentences.js?v=22";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=23";
+import { resolverImagen, liberarMedios } from "./medios.js?v=23";
+import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=23";
+import { splitSentences } from "./sentences.js?v=23";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut, guardarArchivo, obtenerArchivo,
-} from "./storage.js?v=22";
+} from "./storage.js?v=23";
 
 const $ = (id) => document.getElementById(id);
 
@@ -237,13 +238,20 @@ async function renderLibrary() {
 
 async function uploadFile(file) {
   if (!file) return;
-  if (!/\.pdf$/i.test(file.name)) { toast("Solo se aceptan archivos PDF", true); return; }
+  const esEpub = /\.epub$/i.test(file.name);
+  if (!esEpub && !/\.pdf$/i.test(file.name)) {
+    toast("Solo se aceptan archivos PDF o EPUB", true); return;
+  }
   $("drop").classList.add("busy");
   $("drop").querySelector("strong").textContent = "Procesando…";
   try {
-    const doc = await extractFromPdf(await file.arrayBuffer(), file.name);
+    const doc = esEpub
+      ? await extractFromEpub(await file.arrayBuffer(), file.name)
+      : await extractFromPdf(await file.arrayBuffer(), file.name);
     if (!doc.segments.length) {
-      throw new Error("Este PDF no contiene texto seleccionable (probablemente es un escaneo). Aún no incluimos OCR.");
+      throw new Error(esEpub
+        ? "Este EPUB no tiene texto legible (puede estar protegido con DRM)."
+        : "Este PDF no contiene texto seleccionable (probablemente es un escaneo). Aún no incluimos OCR.");
     }
     const library = await getLibrary();
     const previo = library.find((d) => d.id === doc.id);
@@ -264,7 +272,7 @@ async function uploadFile(file) {
     toast(err.message || "No se pudo procesar el PDF", true);
   } finally {
     $("drop").classList.remove("busy");
-    $("drop").querySelector("strong").textContent = "Arrastra tu PDF aquí";
+    $("drop").querySelector("strong").textContent = "Arrastra tu libro aquí";
   }
 }
 
@@ -272,12 +280,16 @@ async function uploadFile(file) {
 /* Con el archivo original guardado, un libro procesado por un motor anterior se
    pone al dia el solo. Antes habia que volver a arrastrarlo en cada aparato. */
 async function reprocesarSiHaceFalta(doc) {
-  if ((doc.motor || 0) >= MOTOR_EXTRACCION) return;
+  const esEpub = doc.formato === "epub";
+  const motorActual = esEpub ? MOTOR_EPUB : MOTOR_EXTRACCION;
+  if ((doc.motor || 0) >= motorActual) return;
   const archivo = await obtenerArchivo(doc.id).catch(() => null);
   if (!archivo) return;                       // sin archivo: queda el aviso de siempre
   try {
     toast("Poniendo el libro al día…");
-    const nuevo = await extractFromPdf(await archivo.arrayBuffer(), doc.title);
+    const nuevo = esEpub
+      ? await extractFromEpub(await archivo.arrayBuffer(), doc.title)
+      : await extractFromPdf(await archivo.arrayBuffer(), doc.title);
     nuevo.id = doc.id;                        // posicion y subrayados van por id
     await saveDoc(nuevo);
     const posicion = Math.min(state.para, nuevo.segments.length - 1);
@@ -304,12 +316,15 @@ const RE_TEXTO_VIEJO = /[\\uFB00-\\uFB06\\uE000-\\uF8FF\\u0000\\uFFFD\\u0131]/;
 async function avisarEstadoDoc(doc) {
   const clave = `aviso:${doc.id}:${doc.motor || 0}`;
   if (await idbGet("kv", clave).catch(() => null)) return;
+  // Cada formato lleva su propia numeración de motor: comparar la de un EPUB
+  // con la del PDF hacía que un libro recién importado se diera por viejo.
+  const motorActual = doc.formato === "epub" ? MOTOR_EPUB : MOTOR_EXTRACCION;
   let msg = "";
-  if ((!doc.motor || doc.motor < MOTOR_EXTRACCION)
+  if ((doc.motor || 0) < motorActual
       && doc.segments.some((s) => RE_TEXTO_VIEJO.test(s.text))) {
-    msg = "Este libro se procesó con una versión anterior de Lyrio. Vuelve a arrastrar el PDF para que se vea y se lea mejor.";
+    msg = "Este libro se procesó con una versión anterior de Lyrio. Vuelve a arrastrarlo para que se vea y se lea mejor.";
   } else if (doc.danos && doc.danos.nulos + doc.danos.glifos + doc.danos.reemplazos > 0) {
-    msg = "Este PDF trae defectos de origen en algunas letras. Lyrio leerá lo que el documento contiene.";
+    msg = "Este documento trae defectos de origen en algunas letras. Lyrio leerá lo que contiene.";
   }
   if (!msg) return;
   toast(msg);

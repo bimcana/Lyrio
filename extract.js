@@ -2,11 +2,11 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=22";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=23";
 import {
   MAX_SEGMENT_CHARS, MIN_SEGMENT_CHARS, RE_HUECO, RE_HUECO_G, RE_LETRA,
   normalizeAccents, limpiarRestos, cleanBlock, splitLong, detectLanguage,
-} from "./texto.js?v=22";
+} from "./texto.js?v=23";
 
 export { detectLanguage };
 
