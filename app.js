@@ -2,14 +2,15 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=21";
-import { splitSentences } from "./sentences.js?v=21";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=22";
+import { resolverImagen, liberarMedios } from "./medios.js?v=22";
+import { splitSentences } from "./sentences.js?v=22";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
-  idbGet, idbPut,
-} from "./storage.js?v=21";
+  idbGet, idbPut, guardarArchivo, obtenerArchivo,
+} from "./storage.js?v=22";
 
 const $ = (id) => document.getElementById(id);
 
@@ -248,6 +249,10 @@ async function uploadFile(file) {
     const previo = library.find((d) => d.id === doc.id);
     const position = previo ? previo.position || 0 : 0;
     await saveDoc(doc);
+    // El original habilita las imagenes y el reprocesado automatico.
+    if (!await guardarArchivo(doc.id, file)) {
+      toast("No hay espacio para guardar el archivo: este libro no mostrará imágenes.");
+    }
     const resto = library.filter((d) => d.id !== doc.id);
     resto.unshift({
       id: doc.id, title: doc.title, pages: doc.pages, lang: doc.lang,
@@ -260,6 +265,26 @@ async function uploadFile(file) {
   } finally {
     $("drop").classList.remove("busy");
     $("drop").querySelector("strong").textContent = "Arrastra tu PDF aquí";
+  }
+}
+
+
+/* Con el archivo original guardado, un libro procesado por un motor anterior se
+   pone al dia el solo. Antes habia que volver a arrastrarlo en cada aparato. */
+async function reprocesarSiHaceFalta(doc) {
+  if ((doc.motor || 0) >= MOTOR_EXTRACCION) return;
+  const archivo = await obtenerArchivo(doc.id).catch(() => null);
+  if (!archivo) return;                       // sin archivo: queda el aviso de siempre
+  try {
+    toast("Poniendo el libro al día…");
+    const nuevo = await extractFromPdf(await archivo.arrayBuffer(), doc.title);
+    nuevo.id = doc.id;                        // posicion y subrayados van por id
+    await saveDoc(nuevo);
+    const posicion = Math.min(state.para, nuevo.segments.length - 1);
+    await enterReader(nuevo, posicion);
+    toast("Libro actualizado con la extracción nueva.");
+  } catch {
+    // Se queda el de antes: no se pierde nada.
   }
 }
 
@@ -322,6 +347,7 @@ async function enterReader(doc, position) {
     wrap.appendChild(p);
     renderParagraph(seg.i);
   }
+  montarFiguras(doc);
   updateChips();
   setCurrent(state.para, 0, { instant: true });
   // Las tipografias web pueden entrar despues de calcular la posicion: al
@@ -333,12 +359,14 @@ async function enterReader(doc, position) {
   updateMediaSession();
   requestWakeLock();
   avisarEstadoDoc(doc).catch(() => {});
+  reprocesarSiHaceFalta(doc).catch(() => {});
   // Se va pidiendo el audio de donde quedó la lectura: así el primer toque
   // en Leer no espera a la red (y de paso despierta el motor si dormía).
   if (usaNeural()) fetchPara(state.para).catch(() => {});
 }
 
 function exitReader() {
+  desmontarFiguras();
   stopPlayback();
   savePosition();
   state.doc = null;
@@ -934,6 +962,117 @@ function speakDevice() {
   }, 10000);
 }
 
+
+/* ---------- figuras del documento ----------
+
+   La imagen no es una unidad de lectura: no se lee en voz alta y no cambia el
+   curso de la lectura. Solo se intercala donde el documento la coloca, y solo
+   se trae del archivo cuando esta a punto de verse. */
+
+let observadorFiguras = null;
+let repasoFiguras = null;
+
+function montarFiguras(doc) {
+  desmontarFiguras();
+  if (state.settings.mostrarImagenes === false) return;
+  const lista = doc.imagenes || [];
+  if (!lista.length) return;
+
+  lista.forEach((im, k) => {
+    const fig = document.createElement("figure");
+    fig.className = "fig";
+    fig.dataset.k = String(k);
+    fig.tabIndex = 0;
+    fig.setAttribute("role", "button");
+    fig.setAttribute("aria-label", "Ampliar la imagen");
+    // La proporcion se reserva ANTES de cargar. Si la altura cambiara al llegar
+    // la imagen, el texto daria un salto y se perderia el punto de lectura: es
+    // justo el fallo que se corrigio en v21.
+    if (im.w > 0 && im.h > 0) fig.style.aspectRatio = `${im.w} / ${im.h}`;
+    const destino = im.tras >= 0 ? segEl(im.tras) : null;
+    if (destino) destino.after(fig);
+    else $("segments").prepend(fig);
+  });
+
+  /* Traer la imagen de una figura, una sola vez. */
+  const traer = (fig) => {
+    if (fig.dataset.pedida) return;
+    fig.dataset.pedida = "1";
+    const k = Number(fig.dataset.k);
+    resolverImagen(doc, k).then((url) => {
+      if (!fig.isConnected) return;
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = doc.imagenes[k].alt || "";
+      fig.appendChild(img);
+    }).catch(() => {
+      // Si una imagen no se puede componer se retira sin ruido: el texto es lo
+      // que importa y no debe alterarse por esto.
+      fig.remove();
+    });
+  };
+
+  /* El observador es el camino normal, pero no siempre corre: cuando la
+     pestaña no esta componiendo (segundo plano, ventana oculta) puede no
+     disparar nunca. Por eso hay ademas un repaso propio al desplazar, que
+     mira quien esta a la vista. Sale barato y evita figuras en blanco. */
+  const MARGEN = 800;
+  const repasar = () => {
+    const zona = $("stage").getBoundingClientRect();
+    for (const fig of document.querySelectorAll("#segments .fig:not([data-pedida])")) {
+      const r = fig.getBoundingClientRect();
+      if (r.bottom > zona.top - MARGEN && r.top < zona.bottom + MARGEN) traer(fig);
+    }
+  };
+
+  observadorFiguras = new IntersectionObserver((entradas) => {
+    for (const e of entradas) if (e.isIntersecting) traer(e.target);
+  }, { root: $("stage"), rootMargin: `${MARGEN}px 0px` });
+  document.querySelectorAll("#segments .fig").forEach((f) => observadorFiguras.observe(f));
+
+  let repasoPedido = 0;
+  repasoFiguras = () => {
+    if (repasoPedido) return;
+    repasoPedido = setTimeout(() => { repasoPedido = 0; repasar(); }, 150);
+  };
+  $("stage").addEventListener("scroll", repasoFiguras, { passive: true });
+  repasar();
+}
+
+function desmontarFiguras() {
+  observadorFiguras?.disconnect();
+  observadorFiguras = null;
+  if (repasoFiguras) { $("stage").removeEventListener("scroll", repasoFiguras); repasoFiguras = null; }
+  document.querySelectorAll("#segments .fig").forEach((f) => f.remove());
+  liberarMedios();
+}
+
+/* ---------- visor a pantalla completa ----------
+   Es una capa por encima, asi que la posicion de lectura no se toca: al cerrar
+   se vuelve exactamente al mismo punto. */
+
+let visorEscala = 1, visorX = 0, visorY = 0;
+
+function pintarVisor() {
+  $("visorImg").style.transform =
+    `translate(${visorX}px, ${visorY}px) scale(${visorEscala})`;
+}
+
+function abrirVisor(url) {
+  visorEscala = 1; visorX = 0; visorY = 0;
+  $("visorImg").src = url;
+  pintarVisor();
+  $("visor").classList.remove("hidden");
+  $("visorCerrar").focus();
+}
+
+function cerrarVisor() {
+  $("visor").classList.add("hidden");
+  $("visorImg").src = "";
+}
+
+const visorAbierto = () => !$("visor").classList.contains("hidden");
+
 /* ---------- control de reproducción ---------- */
 
 function usaNeural() {
@@ -1452,6 +1591,9 @@ function highlightChipRows() {
   const modo = state.settings.scrollMode || "auto";
   $("scrollChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.scroll === modo));
+  const conImagenes = state.settings.mostrarImagenes !== false;
+  $("imagenesChips").querySelectorAll(".chip").forEach((c) =>
+    c.classList.toggle("active", (c.dataset.img === "1") === conImagenes));
   $("scrollHint").textContent = SCROLL_HINTS[modo] || "";
 }
 
@@ -1560,6 +1702,48 @@ function wireEvents() {
   ["wheel", "touchmove"].forEach((ev) =>
     stage.addEventListener(ev, () => { state.userScrolledAt = Date.now(); }, { passive: true }));
 
+  /* Figuras: abrir el visor con raton, trackpad, dedo o teclado. */
+  stage.addEventListener("click", (e) => {
+    const img = e.target.closest?.(".fig")?.querySelector("img");
+    if (img?.src) abrirVisor(img.src);
+  });
+  stage.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const img = e.target.closest?.(".fig")?.querySelector("img");
+    if (img?.src) { e.preventDefault(); abrirVisor(img.src); }
+  });
+
+  $("visorCerrar").addEventListener("click", cerrarVisor);
+  $("visor").addEventListener("click", (e) => { if (e.target.id === "visor") cerrarVisor(); });
+  $("visor").addEventListener("wheel", (e) => {
+    e.preventDefault();
+    visorEscala = Math.min(6, Math.max(1, visorEscala * (e.deltaY < 0 ? 1.15 : 0.87)));
+    if (visorEscala === 1) { visorX = 0; visorY = 0; }
+    pintarVisor();
+  }, { passive: false });
+  let arrastreVisor = null;
+  $("visor").addEventListener("pointerdown", (e) => {
+    if (visorEscala > 1) arrastreVisor = { x: e.clientX - visorX, y: e.clientY - visorY };
+  });
+  $("visor").addEventListener("pointermove", (e) => {
+    if (!arrastreVisor || e.buttons === 0) return;
+    visorX = e.clientX - arrastreVisor.x; visorY = e.clientY - arrastreVisor.y;
+    pintarVisor();
+  });
+  ["pointerup", "pointercancel"].forEach((ev) =>
+    $("visor").addEventListener(ev, () => { arrastreVisor = null; }));
+
+  /* Interruptor de imagenes: surte efecto ya, sin perder el punto de lectura. */
+  $("imagenesChips").querySelectorAll(".chip").forEach((b) =>
+    b.addEventListener("click", () => {
+      saveSettings({ mostrarImagenes: b.dataset.img === "1" });
+      highlightChipRows();
+      if (state.doc) {
+        montarFiguras(state.doc);
+        mantenerALaVista({ instant: true, forzar: true });
+      }
+    }));
+
   $("hlCopy").addEventListener("click", copyPicked);
   $("hlMenu").querySelectorAll(".hl-dot").forEach((b) =>
     b.addEventListener("click", () => setHighlight(b.dataset.c)));
@@ -1636,7 +1820,10 @@ function wireEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
     // Escape cierra tambien desde el inicio, donde hay hoja de ajustes.
-    if (e.key === "Escape") { closeSheet(); closePopovers(); hideHlMenu(); return; }
+    if (e.key === "Escape") {
+      if (visorAbierto()) { cerrarVisor(); return; }
+      closeSheet(); closePopovers(); hideHlMenu(); return;
+    }
     if ($("reader").classList.contains("hidden")) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;   // no pisar los atajos del sistema
 

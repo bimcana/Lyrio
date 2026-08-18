@@ -2,12 +2,16 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=21";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=22";
+import {
+  MAX_SEGMENT_CHARS, MIN_SEGMENT_CHARS, RE_HUECO, RE_HUECO_G, RE_LETRA,
+  normalizeAccents, limpiarRestos, cleanBlock, splitLong, detectLanguage,
+} from "./texto.js?v=22";
+
+export { detectLanguage };
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./pdfjs/pdf.worker.min.mjs", import.meta.url).toString();
 
-const MAX_SEGMENT_CHARS = 600;
-const MIN_SEGMENT_CHARS = 3;
 const MAX_HEADING_CHARS = 90;
 const HEADING_MIN_SCORE = 3;
 
@@ -16,62 +20,15 @@ const HEADING_MIN_SCORE = 3;
    y conviene volver a arrastrar el PDF. */
 export const MOTOR_EXTRACCION = 2;
 
-const SENTENCE_SPLIT = /(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"'(«0-9])/;
 const HEADING_WORDS = /^\s*(cap[íi]tulo|chapter|parte|part|secci[óo]n|section|pilar|lecci[óo]n|lesson|libro|book|unidad|unit|tema|m[óo]dulo|module|ap[ée]ndice|appendix|pr[óo]logo|prologue|ep[íi]logo|epilogue|introducci[óo]n|introduction|conclusi[óo]n|conclusion|prefacio|preface)\b/i;
 const NUMBERED = /^\s*\d{1,3}[.)\-–—:]\s+\S/;
 const ROMAN = /^\s*[IVXLC]{1,7}[.)\-–—:]\s+\S/;
 const BOLD_FONT = /bold|black|heavy|semib|demib/i;
 
-const ES_STOP = new Set(["el", "la", "los", "las", "de", "que", "en", "un", "una", "por", "con", "para", "como", "más", "pero", "sus", "está"]);
-const EN_STOP = new Set(["the", "and", "of", "to", "in", "is", "it", "that", "for", "with", "as", "was", "on", "are", "this", "be"]);
-
 function cleanTitle(title) {
   title = normalizeAccents(title).trim().replace(/^\s*Microsoft \w+\s*-\s*/, "");
   title = title.replace(/\.(docx?|rtf|odt|pdf|txt)\s*$/i, "");
   return title.trim();
-}
-
-/* Muchos PDF guardan los acentos por separado: la letra base y encima el
-   acento suelto. Para la í usan además la «i sin punto» (ı, una letra turca),
-   que el motor de voz no reconoce como vocal y se salta al leer. Aquí se
-   recomponen a la letra acentuada de toda la vida. */
-/* Las imprentas unen ciertas parejas en un solo signo (fi ligada, etc.). Si
-   llegan asi, la voz las lee mal o se las salta; aqui vuelven a ser letras
-   sueltas. U+F001/U+F002 son la convencion antigua de Adobe para fi/fl en el
-   area privada de Unicode: en pantalla no se ven y la voz las salta. */
-const LIGADURAS = {
-  "\uFB00": "ff", "\uFB01": "fi", "\uFB02": "fl", "\uFB03": "ffi", "\uFB04": "ffl",
-  "\uFB05": "st", "\uFB06": "st",
-  "\u0132": "IJ", "\u0133": "ij", "\u0152": "OE", "\u0153": "oe",
-  "\u00C6": "AE", "\u00E6": "ae",
-  "\uF001": "fi", "\uF002": "fl",
-  "\u017F": "s",              // s larga de imprentas antiguas
-};
-
-/* Huecos que deja un PDF mal generado: el nulo al que algunos ToUnicode
-   mandan sus glifos, el area privada sin equivalencia y el signo de
-   reemplazo. NO se borran aqui: primero se intenta deducir que letra eran
-   (ver deducirGlifos); lo que quede sin resolver lo quita limpiarRestos. */
-const RE_HUECO_G = /[\u0000\uE000-\uF8FF\uFFFD]/g;
-const RE_HUECO = /[\u0000\uE000-\uF8FF\uFFFD]/;   // sin /g: .test() no mueve lastIndex
-const RE_LETRA = /[A-Za-z\u00C0-\u024F]/;
-
-function normalizeAccents(text) {
-  return text
-    .replace(/[\uFB00-\uFB06\u0132\u0133\u0152\u0153\u00C6\u00E6\uF001\uF002\u017F]/g, (c) => LIGADURAS[c] ?? c)
-    .replace(/\u0131/g, "i")          // i sin punto (turca) -> i
-    .replace(/\u0237/g, "j")          // j sin punto -> j
-    // Controles y anchos invisibles: no aportan nada y hacen tropezar a la
-    // voz. Los huecos de glifo se conservan hasta intentar identificarlos.
-    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF]/g, "")
-    .replace(/[\u00A0\u202F\u2007]/g, " ")
-    .normalize("NFC");                // i + acento suelto -> i acentuada
-}
-
-/* Ultimo recorrido: se van los huecos que no se pudieron identificar y el
-   espacio sobrante que dejan al desaparecer. */
-function limpiarRestos(text) {
-  return text.replace(RE_HUECO_G, "").replace(/\s{2,}/g, " ").trim();
 }
 
 /* ---- identificar los glifos que el PDF entrega rotos ----
@@ -173,49 +130,6 @@ function aplicarGlifos(texto, mapa) {
     if (regla.exigeIL && !/[il]/i.test(texto[pos + 1] || "")) return c;
     return regla.letra;
   });
-}
-
-function cleanBlock(text) {
-  return normalizeAccents(text)
-    .replace(/­/g, "")
-    .replace(/-\s*\n\s*/g, "")
-    .replace(/\s*\n\s*/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function splitLong(text) {
-  if (text.length <= MAX_SEGMENT_CHARS) return [text];
-  const sentences = text.split(SENTENCE_SPLIT);
-  const out = [];
-  let current = "";
-  for (const s of sentences) {
-    if (current && current.length + s.length + 1 > MAX_SEGMENT_CHARS) {
-      out.push(current);
-      current = s;
-    } else {
-      current = (current + " " + s).trim();
-    }
-    while (current.length > MAX_SEGMENT_CHARS * 1.5) {
-      let cut = current.lastIndexOf(",", MAX_SEGMENT_CHARS);
-      if (cut < MAX_SEGMENT_CHARS / 2) cut = current.lastIndexOf(" ", MAX_SEGMENT_CHARS);
-      if (cut <= 0) cut = MAX_SEGMENT_CHARS;
-      out.push(current.slice(0, cut + 1).trim());
-      current = current.slice(cut + 1).trim();
-    }
-  }
-  if (current) out.push(current);
-  return out;
-}
-
-export function detectLanguage(text) {
-  const words = text.toLowerCase().match(/[a-záéíóúñü]+/g) || [];
-  let es = 0, en = 0;
-  for (const w of words) {
-    if (ES_STOP.has(w)) es++;
-    if (EN_STOP.has(w)) en++;
-  }
-  return es >= en ? "es" : "en";
 }
 
 /* Encabezados y pies de página sueltos (números, romanos): estorban la lectura. */
@@ -344,6 +258,7 @@ function blocksFromLines(lines, pageNumber, pageHeight) {
     .map((b) => ({
       text: cleanBlock(b.texts.join("\n")),
       page: b.page,
+      top: b.top,
       avgSize: b.chars ? b.weighted / b.chars : 10,
       boldFrac: b.chars ? b.boldChars / b.chars : 0,
       chars: b.chars,
@@ -430,6 +345,79 @@ async function sha1Hex(buffer) {
    vacías (típicamente la f y sus ligaduras). */
 const BASE_PDFJS = new URL("./pdfjs/", import.meta.url).toString();
 
+/* ---- donde estan las imagenes de cada pagina ----
+
+   Los operadores de dibujo dicen donde se pinta cada imagen. Aqui solo interesa
+   el RECTANGULO, no los pixeles: guardar la posicion no cuesta nada, y la
+   imagen se saca luego del archivo original, solo cuando va a verse. */
+
+const mulMatriz = (m, n) => [
+  m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+  m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+  m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+];
+
+async function imagenesDePagina(page, numero) {
+  const ops = await page.getOperatorList();
+  const OPS = pdfjsLib.OPS;
+  const anchoPagina = page.getViewport({ scale: 1 }).width;
+  const encontradas = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const pila = [];
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    if (fn === OPS.save) pila.push(ctm.slice());
+    else if (fn === OPS.restore) ctm = pila.pop() || ctm;
+    else if (fn === OPS.transform) ctm = mulMatriz(ctm, ops.argsArray[i]);
+    else if (fn === OPS.paintImageXObject || fn === OPS.paintJpegXObject) {
+      const clave = ops.argsArray[i]?.[0];
+      // La imagen se dibuja sobre el cuadrado unidad transformado por la matriz
+      // en curso: sus cuatro esquinas dan el rectangulo real en la pagina.
+      const [a, b, c, d, e, f] = ctm;
+      const xs = [e, a + e, c + e, a + c + e];
+      const ys = [f, b + f, d + f, b + d + f];
+      encontradas.push({
+        pagina: numero,
+        clave,
+        rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+        anchoPagina,
+      });
+    }
+  }
+  return encontradas;
+}
+
+/* Que se descarta y que no.
+
+   La tentacion es filtrar por forma: "si es ancha y baja sera un adorno". Se
+   probo con el libro real y result0 SER FALSO — los diagramas manuscritos de
+   estos libros son justo anchos y bajos ("SI NO LOGRAS X EN Y TIEMPO...", el
+   esquema de escasez), y el filtro se los comia. Contenido perdido en silencio
+   es peor que un logotipo de mas.
+
+   Asi que solo se descarta lo indiscutible: motas de pocos puntos, y el
+   mobiliario que se repite pagina tras pagina (un logotipo en la cabecera de
+   cada capitulo). Ante cualquier duda, se muestra. */
+function esMota(rect) {
+  return (rect[2] - rect[0]) < 20 || (rect[3] - rect[1]) < 20;
+}
+
+/* Una imagen del mismo tamano repetida en muchas paginas distintas no es una
+   figura: es el sello de la casa impreso en cada capitulo. */
+function marcarRepetidas(lista) {
+  const grupos = new Map();
+  for (const im of lista) {
+    const clave = `${Math.round(im.rect[2] - im.rect[0])}x${Math.round(im.rect[3] - im.rect[1])}`;
+    if (!grupos.has(clave)) grupos.set(clave, new Set());
+    grupos.get(clave).add(im.pagina);
+  }
+  const mobiliario = new Set();
+  for (const [clave, paginas] of grupos) {
+    if (paginas.size >= 5) mobiliario.add(clave);
+  }
+  return mobiliario;
+}
+
 /* Cuenta letras que el PDF entrega ya rotas y que no se pueden recuperar:
    nulos de mapas defectuosos, glifos del área privada sin equivalencia y
    signos de reemplazo. Sirve para avisar con honestidad, no para adivinar. */
@@ -453,6 +441,7 @@ export async function extractFromPdf(arrayBuffer, fileName) {
   }).promise;
 
   const rawBlocks = [];
+  const imagenesCrudas = [];
   const sizeCount = new Map();
   const danos = { nulos: 0, glifos: 0, reemplazos: 0 };
   for (let p = 1; p <= pdf.numPages; p++) {
@@ -461,6 +450,7 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     // es la que parte los acentos y deshace ligaduras perdiendo letras.
     const content = await page.getTextContent({ disableNormalization: true });
     const pageHeight = page.getViewport({ scale: 1 }).height;
+    for (const im of await imagenesDePagina(page, p)) imagenesCrudas.push(im);
     const lines = linesFromItems(content.items);
     for (const block of blocksFromLines(lines, p, pageHeight)) {
       rawBlocks.push(block);
@@ -492,15 +482,43 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     const isHeading = headingScore(rb.text, rb.avgSize, rb.boldFrac, bodySize) >= HEADING_MIN_SCORE;
     if (isHeading) {
       heuristicChapters.push({ title: rb.text.slice(0, 80), seg: segments.length });
-      segments.push({ i: segments.length, text: rb.text, page: rb.page });
+      segments.push({ i: segments.length, text: rb.text, page: rb.page, top: rb.top });
       continue;
     }
     for (const piece of splitLong(rb.text)) {
       if (piece.length >= MIN_SEGMENT_CHARS) {
-        segments.push({ i: segments.length, text: piece, page: rb.page });
+        segments.push({ i: segments.length, text: piece, page: rb.page, top: rb.top });
       }
     }
   }
+
+  /* El ancla es un indice de SEGMENTO, pero la posicion de la imagen se conoce
+     en coordenadas de pagina. Entre medias, joinContinuations() une bloques
+     partidos por salto de pagina y descarta encabezados corridos, asi que los
+     indices se desplazan: por eso esto se resuelve AL FINAL, cuando cada
+     segmento ya sabe de que pagina viene. Anclar antes las colocaria corridas. */
+  const imagenes = [];
+  let imagenesDescartadas = 0;
+  const mobiliario = marcarRepetidas(imagenesCrudas);
+  for (const im of imagenesCrudas) {
+    const forma = `${Math.round(im.rect[2] - im.rect[0])}x${Math.round(im.rect[3] - im.rect[1])}`;
+    if (esMota(im.rect) || mobiliario.has(forma)) { imagenesDescartadas++; continue; }
+    // Ultimo segmento que queda por encima de la imagen. El eje vertical del
+    // PDF crece hacia arriba, asi que "por encima" es tener la y mayor.
+    let tras = -1;
+    for (const seg of segments) {
+      if (seg.page < im.pagina) tras = seg.i;
+      else if (seg.page === im.pagina && (seg.top ?? Infinity) > im.rect[3]) tras = seg.i;
+      else if (seg.page > im.pagina) break;
+    }
+    imagenes.push({
+      tras,
+      ref: { pagina: im.pagina, clave: im.clave },
+      w: Math.round(im.rect[2] - im.rect[0]),
+      h: Math.round(im.rect[3] - im.rect[1]),
+    });
+  }
+  imagenes.sort((a, b) => a.tras - b.tras);
 
   const chapters = (await chaptersFromOutline(pdf, segments));
   const finalChapters = chapters.length ? chapters : heuristicChapters;
@@ -532,6 +550,9 @@ export async function extractFromPdf(arrayBuffer, fileName) {
     chapters: finalChapters,
     lang: docLang,
     motor: MOTOR_EXTRACCION,
+    formato: "pdf",
+    imagenes,
+    ...(imagenesDescartadas ? { imagenesDescartadas } : {}),
     ...(totalDanos ? { danos } : {}),
     ...(reparaciones.length ? { reparaciones } : {}),
   };

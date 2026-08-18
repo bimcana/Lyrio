@@ -2,7 +2,7 @@
 "use strict";
 
 const DB_NAME = "lyrio";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise = null;
 
 function openDb() {
@@ -14,6 +14,7 @@ function openDb() {
         if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs");
         if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv");
         if (!db.objectStoreNames.contains("audio")) db.createObjectStore("audio");
+        if (!db.objectStoreNames.contains("archivos")) db.createObjectStore("archivos");
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -56,8 +57,30 @@ export async function saveDoc(doc) {
 
 export async function deleteDoc(id) {
   await idbDel("docs", id);
+  await borrarArchivo(id);
   await saveLibrary((await getLibrary()).filter((d) => d.id !== id));
 }
+
+/* ---- el archivo original de cada libro ----
+
+   De él salen las imágenes, así que no hay que duplicarlas, y gracias a él la
+   app puede poner un libro al día ella sola cuando mejora el motor, en vez de
+   pedir que se vuelva a arrastrar en cada aparato. */
+
+export async function guardarArchivo(id, blob) {
+  try {
+    await idbPut("archivos", id, blob);
+    return true;
+  } catch (err) {
+    // Sin sitio (típico en iOS con libros grandes). No puede impedir la
+    // lectura: se sigue sin imágenes y quien llama decide si avisar.
+    console.warn("No se pudo guardar el archivo original:", err?.name || err);
+    return false;
+  }
+}
+
+export const obtenerArchivo = (id) => idbGet("archivos", id);
+export const borrarArchivo = (id) => idbDel("archivos", id).catch(() => {});
 
 export async function savePosition(id, position) {
   const library = await getLibrary();
@@ -106,6 +129,7 @@ export const DEFAULT_SETTINGS = {
   width: "medio",
   scrollMode: "auto",     // auto | siempre | parrafo | manual
   align: "izquierda",     // izquierda | centro | derecha | justificado
+  mostrarImagenes: true,  // las figuras se ven; apagarlo no afecta al audio
 };
 
 /* subrayados por documento: { "parrafo:oracion": color } */
