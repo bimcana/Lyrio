@@ -9,7 +9,7 @@
 
 import {
   MIN_SEGMENT_CHARS, cleanBlock, limpiarRestos, splitLong, detectLanguage,
-} from "./texto.js?v=24";
+} from "./texto.js?v=25";
 
 export const MOTOR_EPUB = 1;
 

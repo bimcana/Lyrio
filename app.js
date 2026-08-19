@@ -2,16 +2,16 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=24";
-import { resolverImagen, liberarMedios } from "./medios.js?v=24";
-import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=24";
-import { splitSentences } from "./sentences.js?v=24";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=25";
+import { resolverImagen, liberarMedios } from "./medios.js?v=25";
+import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=25";
+import { splitSentences } from "./sentences.js?v=25";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut, guardarArchivo, obtenerArchivo,
-} from "./storage.js?v=24";
+} from "./storage.js?v=25";
 
 const $ = (id) => document.getElementById(id);
 
@@ -474,11 +474,16 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
 
 /* Coloca la oración en curso a un cuarto de pantalla desde arriba, dejando
    tres cuartos por delante para que los párrafos largos no se salgan. */
-const ANCLA = 0.25;
-/* Hasta dónde se deja subir la lectura antes de recolocar el texto. Con letra
-   muy grande caben pocas líneas, así que aprovechar más pantalla antes de
-   mover evita que el texto salte cada dos por tres. Configurable. */
-const umbralSubida = () => Math.min(0.95, Math.max(0.6, (state.settings.umbralSubida ?? 66) / 100));
+/* Dónde queda la línea que se está leyendo, medida DESDE ABAJO igual que el
+   ajuste: 75 % deja la línea a un cuarto desde arriba (lo de siempre), y 95 %
+   la lleva casi al borde superior. Cuanto más alta, más margen superior se
+   aprovecha y menos veces salta el texto — que es lo que hace falta cuando la
+   letra es muy grande y caben pocas líneas. */
+const ancla = () => 1 - Math.min(0.95, Math.max(0.6, (state.settings.alturaLectura ?? 75) / 100));
+
+/* Hasta dónde se deja bajar la lectura antes de recolocar. Siempre por debajo
+   del ancla, para que quede recorrido de sobra antes de mover el texto. */
+const umbralSubida = () => Math.max(0.66, ancla() + 0.2);
 
 function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = false } = {}) {
   const modo = state.settings.scrollMode || "auto";
@@ -497,7 +502,7 @@ function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = fals
   // es lo que hace que el texto quede donde la voz va leyendo.
   if (!forzar && modo === "auto" && posicion >= 0 && posicion < umbralSubida()) return;
 
-  const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ANCLA;
+  const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ancla();
   // OJO: "auto" no significa instantaneo, significa «lo que diga el CSS», y el
   // CSS de #stage pide scroll-behavior: smooth. Para saltar de verdad hay que
   // pedir "instant"; con "auto" el salto al abrir un libro no llegaba a
@@ -1231,20 +1236,23 @@ function setPlayUI(mode) {
   }
 }
 
-/* Como en un reproductor de vídeo: al mover el ratón (o tocar) los controles
-   aparecen, y si no hay actividad vuelven a esconderse para no tapar el texto.
-   Solo con puntero fino: con el dedo, el toque ya los alterna. */
+/* Como en un reproductor de vídeo: al mover el ratón o el trackpad los
+   controles aparecen, y si no hay actividad vuelven a esconderse.
+
+   OJO con cómo se detecta el ratón. Preguntar por «(hover: hover) and
+   (pointer: fine)» NO sirve: iPadOS responde que no aunque tengas el Magic
+   Keyboard conectado, porque se considera táctil de serie, y los controles no
+   reaccionaban nunca en el iPad. Lo que sí es fiable es mirar QUÉ generó el
+   evento: un trackpad produce pointerType "mouse", y el dedo "touch". */
 const ESPERA_CONTROLES = 5000;
 let relojControles = 0;
 
 function despertarControles() {
-  if (!matchMedia("(hover: hover) and (pointer: fine)").matches) return;
   if ($("reader").classList.contains("hidden")) return;
   clearTimeout(relojControles);
   if ($("reader").classList.contains("immersive")) setImmersive(false);
   relojControles = setTimeout(() => {
-    // No se esconden si hay algo abierto por encima ni si no se está leyendo.
-    if (!state.playing) return;
+    // Se esconden se esté leyendo o no; solo esperan si hay algo abierto encima.
     if (!$("visor").classList.contains("hidden")) return;
     if (!$("sheet").classList.contains("hidden")) return;
     if (document.querySelector(".popover:not(.hidden)")) return;
@@ -1657,9 +1665,9 @@ function highlightChipRows() {
   const modo = state.settings.scrollMode || "auto";
   $("scrollChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.scroll === modo));
-  const umbral = state.settings.umbralSubida ?? 66;
-  $("umbralRange").value = umbral;
-  $("umbralOut").textContent = `${umbral} %`;
+  const altura = state.settings.alturaLectura ?? 75;
+  $("umbralRange").value = altura;
+  $("umbralOut").textContent = `${altura} %`;
   const conImagenes = state.settings.mostrarImagenes !== false;
   $("imagenesChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", (c.dataset.img === "1") === conImagenes));
@@ -1805,8 +1813,10 @@ function wireEvents() {
   /* Interruptor de imagenes: surte efecto ya, sin perder el punto de lectura. */
   $("umbralRange").addEventListener("input", (e) => {
     const v = Number(e.target.value);
-    saveSettings({ umbralSubida: v });
+    saveSettings({ alturaLectura: v });
     $("umbralOut").textContent = `${v} %`;
+    // Se ve el efecto al momento, sin esperar a la siguiente oración.
+    if (state.doc) mantenerALaVista({ instant: true, forzar: true });
   });
 
   $("imagenesChips").querySelectorAll(".chip").forEach((b) =>
@@ -1822,7 +1832,9 @@ function wireEvents() {
   /* Controles que se muestran al mover el ratón y se esconden solos. */
   ["pointermove", "pointerdown"].forEach((ev) =>
     document.addEventListener(ev, (e) => {
-      if (e.pointerType === "touch") return;   // el dedo ya los alterna al tocar
+      // El dedo ya los alterna al tocar la pantalla; esto es para ratón y
+      // trackpad, que en iPadOS llegan igualmente como pointerType "mouse".
+      if (e.pointerType === "touch") return;
       despertarControles();
     }, { passive: true }));
 

@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Nunito:wght@400;600&family=Atkinson+Hyperlegible:wght@400;700&display=swap">
-  <link rel="stylesheet" href="styles.css?v=24">
+  <link rel="stylesheet" href="styles.css?v=25">
 </head>
 <body>
 
@@ -192,10 +192,11 @@
       </div>
       <p class="hint" id="scrollHint"></p>
 
-      <label>Altura a la que sube la lectura <span id="umbralOut" class="pop-value"></span></label>
-      <input id="umbralRange" type="range" min="60" max="95" step="5" value="66">
-      <p class="hint">Cuánto puede subir el párrafo antes de que el texto se
-        recoloque. Más alto aprovecha mejor la pantalla con letra grande.</p>
+      <label>Altura de la línea que se lee <span id="umbralOut" class="pop-value"></span></label>
+      <input id="umbralRange" type="range" min="60" max="95" step="5" value="75">
+      <p class="hint">A qué altura de la pantalla se coloca la línea en curso,
+        medida desde abajo. Más alto la sube y aprovecha el margen superior:
+        útil con letra grande, porque además el texto salta menos veces.</p>
 
       <label>Imágenes del libro</label>
       <div class="chip-row" id="imagenesChips">
@@ -246,7 +247,7 @@
   </div>
 
   <div id="toast" class="hidden"></div>
-  <script type="module" src="app.js?v=24"></script>
+  <script type="module" src="app.js?v=25"></script>
   <div id="visor" class="hidden" role="dialog" aria-modal="true" aria-label="Imagen ampliada">
     <button id="visorCerrar" class="icon-btn" aria-label="Cerrar la imagen">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
