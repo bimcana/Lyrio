@@ -9,7 +9,7 @@
 
 import {
   MIN_SEGMENT_CHARS, cleanBlock, limpiarRestos, splitLong, detectLanguage,
-} from "./texto.js?v=23";
+} from "./texto.js?v=24";
 
 export const MOTOR_EPUB = 1;
 
@@ -24,6 +24,10 @@ async function inflar(bytes, metodo) {
   return new Uint8Array(await new Response(flujo).arrayBuffer());
 }
 
+/* Se lee el índice del ZIP y se anotan las posiciones, pero NO se descomprime
+   nada todavía. Descomprimir las 241 imágenes de un libro y quedárselas en
+   memoria era lo que tumbaba la app con archivos grandes: ahora cada entrada
+   se descomprime cuando se pide, y solo se guardan las pequeñas. */
 export async function leerZip(blob) {
   const buf = new Uint8Array(await blob.arrayBuffer());
   const dv = new DataView(buf.buffer);
@@ -38,7 +42,7 @@ export async function leerZip(blob) {
   const cuantas = dv.getUint16(fin + 10, true);
   let p = dv.getUint32(fin + 16, true);
 
-  const entradas = new Map();
+  const indice = new Map();          // ruta -> { metodo, inicio, largo }
   const decodificador = new TextDecoder("utf-8");
   for (let n = 0; n < cuantas; n++) {
     if (dv.getUint32(p, true) !== FIRMA_ENTRADA) break;
@@ -56,14 +60,32 @@ export async function leerZip(blob) {
     // coincidir con los del directorio: hay que leerlos de ahí.
     const nombreLocal = dv.getUint16(offsetLocal + 26, true);
     const extraLocal = dv.getUint16(offsetLocal + 28, true);
-    const inicio = offsetLocal + 30 + nombreLocal + extraLocal;
-    try {
-      entradas.set(nombre, await inflar(buf.subarray(inicio, inicio + comprimido), metodo));
-    } catch {
-      /* una entrada ilegible no debe tumbar el libro entero */
-    }
+    indice.set(nombre, {
+      metodo,
+      inicio: offsetLocal + 30 + nombreLocal + extraLocal,
+      largo: comprimido,
+    });
   }
-  return entradas;
+
+  const cache = new Map();
+  const LIMITE_CACHE = 64 * 1024;     // solo se guardan las entradas pequeñas
+  return {
+    nombres: () => [...indice.keys()],
+    has: (ruta) => indice.has(ruta),
+    async leer(ruta) {
+      if (cache.has(ruta)) return cache.get(ruta);
+      const e = indice.get(ruta);
+      if (!e) return null;
+      let bytes;
+      try {
+        bytes = await inflar(buf.subarray(e.inicio, e.inicio + e.largo), e.metodo);
+      } catch {
+        return null;                  // una entrada ilegible no tumba el libro
+      }
+      if (bytes.length <= LIMITE_CACHE) cache.set(ruta, bytes);
+      return bytes;
+    },
+  };
 }
 
 /* El tamaño se lee de la cabecera del archivo, no decodificando la imagen:
@@ -92,8 +114,8 @@ function tamanoImagen(bytes) {
 }
 
 const resolverRuta = (base, rel) => new URL(rel, `http://e/${base}`).pathname.slice(1);
-const leerTexto = (entradas, ruta) =>
-  new TextDecoder("utf-8").decode(entradas.get(ruta) || new Uint8Array());
+const leerTexto = async (zip, ruta) =>
+  new TextDecoder("utf-8").decode(await zip.leer(ruta) || new Uint8Array());
 
 async function sha1Hex(buffer) {
   const hash = await crypto.subtle.digest("SHA-1", buffer);
@@ -104,17 +126,17 @@ const BLOQUES = "h1,h2,h3,h4,h5,h6,p,li,blockquote";
 
 export async function extractFromEpub(arrayBuffer, fileName) {
   const id = (await sha1Hex(arrayBuffer)).slice(0, 12);
-  const entradas = await leerZip(new Blob([arrayBuffer]));
+  const zip = await leerZip(new Blob([arrayBuffer]));
   const parser = new DOMParser();
 
   // container.xml dice dónde está el OPF, que es el índice del libro.
   const cont = parser.parseFromString(
-    leerTexto(entradas, "META-INF/container.xml"), "application/xml");
+    await leerTexto(zip, "META-INF/container.xml"), "application/xml");
   const rutaOpf = cont.querySelector("rootfile")?.getAttribute("full-path");
   if (!rutaOpf) throw new Error("Este EPUB no declara su contenido (¿está protegido con DRM?)");
   const baseOpf = rutaOpf.includes("/") ? rutaOpf.slice(0, rutaOpf.lastIndexOf("/") + 1) : "";
 
-  const opf = parser.parseFromString(leerTexto(entradas, rutaOpf), "application/xml");
+  const opf = parser.parseFromString(await leerTexto(zip, rutaOpf), "application/xml");
   const manifiesto = new Map();
   for (const it of opf.querySelectorAll("item")) {
     manifiesto.set(it.getAttribute("id"), {
@@ -140,7 +162,7 @@ export async function extractFromEpub(arrayBuffer, fileName) {
   let imagenesDescartadas = 0;
 
   for (const ruta of orden) {
-    const texto = leerTexto(entradas, ruta);
+    const texto = await leerTexto(zip, ruta);
     if (!texto) continue;
     const doc = parser.parseFromString(texto, "text/html");
     doc.querySelectorAll("script,style,nav").forEach((n) => n.remove());
@@ -150,7 +172,7 @@ export async function extractFromEpub(arrayBuffer, fileName) {
         const src = img.getAttribute("src");
         if (!src) continue;
         const rutaImg = resolverRuta(ruta, src);
-        const { w, h } = tamanoImagen(entradas.get(rutaImg));
+        const { w, h } = tamanoImagen(await zip.leer(rutaImg));
         // Solo se descartan motas: los diagramas de estos libros suelen ser
         // anchos y bajos, y filtrar por forma se comería contenido.
         if (w < 60 || h < 60) { imagenesDescartadas++; continue; }

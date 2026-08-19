@@ -2,11 +2,11 @@
    Chapters: A) PDF outline/bookmarks, B) typographic heuristics. */
 "use strict";
 
-import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=23";
+import * as pdfjsLib from "./pdfjs/pdf.min.mjs?v=24";
 import {
   MAX_SEGMENT_CHARS, MIN_SEGMENT_CHARS, RE_HUECO, RE_HUECO_G, RE_LETRA,
   normalizeAccents, limpiarRestos, cleanBlock, splitLong, detectLanguage,
-} from "./texto.js?v=23";
+} from "./texto.js?v=24";
 
 export { detectLanguage };
 
@@ -360,7 +360,9 @@ const mulMatriz = (m, n) => [
 async function imagenesDePagina(page, numero) {
   const ops = await page.getOperatorList();
   const OPS = pdfjsLib.OPS;
-  const anchoPagina = page.getViewport({ scale: 1 }).width;
+  const vista = page.getViewport({ scale: 1 });
+  const anchoPagina = vista.width;
+  const altoPagina = vista.height;
   const encontradas = [];
   let ctm = [1, 0, 0, 1, 0, 0];
   const pila = [];
@@ -380,11 +382,23 @@ async function imagenesDePagina(page, numero) {
         pagina: numero,
         clave,
         rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
-        anchoPagina,
+        anchoPagina, altoPagina,
       });
     }
   }
   return encontradas;
+}
+
+/* Hay libros rasterizados: cada pagina es UNA foto de la pagina entera, con
+   una capa de texto encima. Esa foto no es una figura — es la pagina que ya
+   estas leyendo — salvo cuando la pagina apenas tiene texto: entonces todo su
+   contenido vive dentro de la imagen (un recuadro, un esquema) y sin mostrarla
+   el lector se lo pierde por completo. */
+function esPaginaEntera(im) {
+  const ancho = im.rect[2] - im.rect[0];
+  const alto = im.rect[3] - im.rect[1];
+  return im.anchoPagina > 0 && im.altoPagina > 0
+    && ancho >= im.anchoPagina * 0.8 && alto >= im.altoPagina * 0.8;
 }
 
 /* Que se descarta y que no.
@@ -499,10 +513,22 @@ export async function extractFromPdf(arrayBuffer, fileName) {
      segmento ya sabe de que pagina viene. Anclar antes las colocaria corridas. */
   const imagenes = [];
   let imagenesDescartadas = 0;
-  const mobiliario = marcarRepetidas(imagenesCrudas);
+  const mobiliario = marcarRepetidas(imagenesCrudas.filter((im) => !esPaginaEntera(im)));
+  // Cuanto texto lleva cada pagina, para saber si una foto a pagina completa
+  // es contenido perdido o la pagina que ya se esta leyendo.
+  const textoPorPagina = new Map();
+  for (const b of rawBlocks) {
+    textoPorPagina.set(b.page, (textoPorPagina.get(b.page) || 0) + b.text.length);
+  }
   for (const im of imagenesCrudas) {
     const forma = `${Math.round(im.rect[2] - im.rect[0])}x${Math.round(im.rect[3] - im.rect[1])}`;
-    if (esMota(im.rect) || mobiliario.has(forma)) { imagenesDescartadas++; continue; }
+    if (esPaginaEntera(im)) {
+      // Solo se muestra si la pagina practicamente no tiene texto: ahi lo que
+      // se ve esta dentro de la foto y no hay otra forma de leerlo.
+      if ((textoPorPagina.get(im.pagina) || 0) >= 200) { imagenesDescartadas++; continue; }
+    } else if (esMota(im.rect) || mobiliario.has(forma)) {
+      imagenesDescartadas++; continue;
+    }
     // Ultimo segmento que queda por encima de la imagen. El eje vertical del
     // PDF crece hacia arriba, asi que "por encima" es tener la y mayor.
     let tras = -1;

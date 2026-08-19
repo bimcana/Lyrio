@@ -2,16 +2,16 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=23";
-import { resolverImagen, liberarMedios } from "./medios.js?v=23";
-import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=23";
-import { splitSentences } from "./sentences.js?v=23";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=24";
+import { resolverImagen, liberarMedios } from "./medios.js?v=24";
+import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=24";
+import { splitSentences } from "./sentences.js?v=24";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut, guardarArchivo, obtenerArchivo,
-} from "./storage.js?v=23";
+} from "./storage.js?v=24";
 
 const $ = (id) => document.getElementById(id);
 
@@ -69,6 +69,8 @@ const state = {
   para: 0,
   sent: 0,
   sentences: new Map(),
+  acum: null,             // caracteres acumulados por parrafo
+  totalChars: 0,
   highlights: {},
   playing: false,
   engine: "neural",       // "neural" (motor) | "device" (voz del sistema)
@@ -342,6 +344,7 @@ async function enterReader(doc, position) {
   state.translation = null;
   state.words = [];
   state.highlights = await getHighlights(doc.id).catch(() => ({}));
+  indexarCaracteres(doc);
 
   $("home").classList.add("hidden");
   $("reader").classList.remove("hidden");
@@ -461,7 +464,10 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
   if (scroll) mantenerALaVista({ instant, parrafoNuevo: antes !== para });
 
   const total = state.doc.segments.length;
-  $("progressFill").style.width = total > 1 ? `${(para / (total - 1)) * 100}%` : "100%";
+  // Por caracteres, no por número de párrafo: los párrafos son muy desiguales
+  // y la barra avanzaba a saltos que no correspondían con la lectura real.
+  const leidoPct = state.totalChars ? (state.acum[para] / state.totalChars) * 100 : 0;
+  $("progressFill").style.width = `${Math.min(100, leidoPct)}%`;
   updateChips();
   schedulePositionSave();
 }
@@ -469,7 +475,10 @@ function setCurrent(para, sent, { instant = false, scroll = true, redraw = true 
 /* Coloca la oración en curso a un cuarto de pantalla desde arriba, dejando
    tres cuartos por delante para que los párrafos largos no se salgan. */
 const ANCLA = 0.25;
-const UMBRAL = 0.66;
+/* Hasta dónde se deja subir la lectura antes de recolocar el texto. Con letra
+   muy grande caben pocas líneas, así que aprovechar más pantalla antes de
+   mover evita que el texto salte cada dos por tres. Configurable. */
+const umbralSubida = () => Math.min(0.95, Math.max(0.6, (state.settings.umbralSubida ?? 66) / 100));
 
 function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = false } = {}) {
   const modo = state.settings.scrollMode || "auto";
@@ -486,7 +495,7 @@ function mantenerALaVista({ instant = false, parrafoNuevo = false, forzar = fals
   const posicion = (linea.top - zona.top) / zona.height;
   // Al arrancar la lectura se lleva siempre al ancla, aunque ya se viera:
   // es lo que hace que el texto quede donde la voz va leyendo.
-  if (!forzar && modo === "auto" && posicion >= 0 && posicion < UMBRAL) return;
+  if (!forzar && modo === "auto" && posicion >= 0 && posicion < umbralSubida()) return;
 
   const destino = stage.scrollTop + (linea.top - zona.top) - zona.height * ANCLA;
   // OJO: "auto" no significa instantaneo, significa «lo que diga el CSS», y el
@@ -737,23 +746,38 @@ function calibrarRitmo(caracteres, segundos) {
   state.cps = state.cps ? state.cps * 0.7 + cps * 0.3 : cps;   // media suavizada
 }
 
-function caracteresRestantes() {
-  if (!state.doc) return 0;
-  const segs = state.doc.segments;
-  let total = 0;
-  for (let i = state.para + 1; i < segs.length; i++) total += segs[i].text.length;
-
-  // Del párrafo en curso, solo lo que queda por leer.
-  const actual = segs[state.para].text;
-  if (state.engine === "neural" && state.audio.duration > 0) {
-    const avance = state.audio.currentTime / state.audio.duration;
-    total += actual.length * (1 - Math.min(1, avance));
-  } else {
-    const s = sentencesFor(state.para)[state.sent];
-    total += actual.length - (s ? s.cs : 0);
+/* Índice de caracteres acumulados. Se calcula una vez al abrir el libro: con
+   dos mil párrafos, recorrerlos entero cada segundo para el reloj es tirar
+   trabajo, y además permite dar el porcentaje por texto y no por número de
+   párrafo, que es mucho más fiel porque los párrafos son muy desiguales. */
+function indexarCaracteres(doc) {
+  const acum = new Array(doc.segments.length + 1);
+  acum[0] = 0;
+  for (let i = 0; i < doc.segments.length; i++) {
+    acum[i + 1] = acum[i] + doc.segments[i].text.length;
   }
-  return total;
+  state.acum = acum;
+  state.totalChars = acum[acum.length - 1] || 1;
 }
+
+/* Cuánto del párrafo en curso se lleva leído, de 0 a 1. */
+function avanceEnParrafo() {
+  if (state.engine === "neural" && state.audio.duration > 0) {
+    return Math.min(1, state.audio.currentTime / state.audio.duration);
+  }
+  const actual = state.doc.segments[state.para].text;
+  const s = sentencesFor(state.para)[state.sent];
+  return actual.length ? Math.min(1, (s ? s.cs : 0) / actual.length) : 0;
+}
+
+function caracteresLeidos() {
+  if (!state.doc || !state.acum) return 0;
+  const largo = state.doc.segments[state.para].text.length;
+  return state.acum[state.para] + largo * avanceEnParrafo();
+}
+
+const caracteresRestantes = () =>
+  Math.max(0, (state.totalChars || 0) - caracteresLeidos());
 
 function formatoTiempo(segundos) {
   const t = Math.max(0, Math.round(segundos));
@@ -768,9 +792,14 @@ function updateTimeLeft() {
   const el = $("timeLeft");
   if (!el) return;
   if (!state.doc) { el.textContent = ""; return; }
+  // Caracteres por segundo aprendidos de los párrafos ya generados, por la
+  // velocidad efectiva: es la estimación más fiel que se puede dar sin
+  // sintetizar el libro entero.
   const cps = (state.cps || CPS_INICIAL) * repartoVelocidad().total;
-  el.textContent = formatoTiempo(caracteresRestantes() / cps);
-  el.title = "Tiempo restante del documento";
+  const restante = caracteresRestantes();
+  const pct = state.totalChars ? Math.round((caracteresLeidos() / state.totalChars) * 100) : 0;
+  el.textContent = `${pct} % · ${formatoTiempo(restante / cps)}`;
+  el.title = `Leído el ${pct} % del documento · queda ${formatoTiempo(restante / cps)} de lectura`;
 }
 
 let relojRestante = 0;
@@ -875,6 +904,7 @@ async function playNeural(seekSent = null) {
     requestWakeLock();
     updateMediaSession();
     startSync();
+    despertarControles();
     // La lectura empieza: el texto se coloca donde la voz va leyendo.
     mantenerALaVista({ instant: true, forzar: true });
     prefetchNext(i);
@@ -1199,6 +1229,27 @@ function setPlayUI(mode) {
   if ("mediaSession" in navigator) {
     navigator.mediaSession.playbackState = mode === "playing" ? "playing" : "paused";
   }
+}
+
+/* Como en un reproductor de vídeo: al mover el ratón (o tocar) los controles
+   aparecen, y si no hay actividad vuelven a esconderse para no tapar el texto.
+   Solo con puntero fino: con el dedo, el toque ya los alterna. */
+const ESPERA_CONTROLES = 5000;
+let relojControles = 0;
+
+function despertarControles() {
+  if (!matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+  if ($("reader").classList.contains("hidden")) return;
+  clearTimeout(relojControles);
+  if ($("reader").classList.contains("immersive")) setImmersive(false);
+  relojControles = setTimeout(() => {
+    // No se esconden si hay algo abierto por encima ni si no se está leyendo.
+    if (!state.playing) return;
+    if (!$("visor").classList.contains("hidden")) return;
+    if (!$("sheet").classList.contains("hidden")) return;
+    if (document.querySelector(".popover:not(.hidden)")) return;
+    setImmersive(true);
+  }, ESPERA_CONTROLES);
 }
 
 function setImmersive(on) {
@@ -1606,6 +1657,9 @@ function highlightChipRows() {
   const modo = state.settings.scrollMode || "auto";
   $("scrollChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", c.dataset.scroll === modo));
+  const umbral = state.settings.umbralSubida ?? 66;
+  $("umbralRange").value = umbral;
+  $("umbralOut").textContent = `${umbral} %`;
   const conImagenes = state.settings.mostrarImagenes !== false;
   $("imagenesChips").querySelectorAll(".chip").forEach((c) =>
     c.classList.toggle("active", (c.dataset.img === "1") === conImagenes));
@@ -1749,6 +1803,12 @@ function wireEvents() {
     $("visor").addEventListener(ev, () => { arrastreVisor = null; }));
 
   /* Interruptor de imagenes: surte efecto ya, sin perder el punto de lectura. */
+  $("umbralRange").addEventListener("input", (e) => {
+    const v = Number(e.target.value);
+    saveSettings({ umbralSubida: v });
+    $("umbralOut").textContent = `${v} %`;
+  });
+
   $("imagenesChips").querySelectorAll(".chip").forEach((b) =>
     b.addEventListener("click", () => {
       saveSettings({ mostrarImagenes: b.dataset.img === "1" });
@@ -1758,6 +1818,13 @@ function wireEvents() {
         mantenerALaVista({ instant: true, forzar: true });
       }
     }));
+
+  /* Controles que se muestran al mover el ratón y se esconden solos. */
+  ["pointermove", "pointerdown"].forEach((ev) =>
+    document.addEventListener(ev, (e) => {
+      if (e.pointerType === "touch") return;   // el dedo ya los alterna al tocar
+      despertarControles();
+    }, { passive: true }));
 
   $("hlCopy").addEventListener("click", copyPicked);
   $("hlMenu").querySelectorAll(".hl-dot").forEach((b) =>

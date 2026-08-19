@@ -130,6 +130,7 @@ export const DEFAULT_SETTINGS = {
   scrollMode: "auto",     // auto | siempre | parrafo | manual
   align: "izquierda",     // izquierda | centro | derecha | justificado
   mostrarImagenes: true,  // las figuras se ven; apagarlo no afecta al audio
+  umbralSubida: 66,       // % de pantalla que puede recorrer el párrafo antes de recolocarse
 };
 
 /* subrayados por documento: { "parrafo:oracion": color } */
