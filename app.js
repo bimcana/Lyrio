@@ -2,16 +2,16 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=25";
-import { resolverImagen, liberarMedios } from "./medios.js?v=25";
-import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=25";
-import { splitSentences } from "./sentences.js?v=25";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=26";
+import { resolverImagen, liberarMedios } from "./medios.js?v=26";
+import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=26";
+import { splitSentences } from "./sentences.js?v=26";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut, guardarArchivo, obtenerArchivo,
-} from "./storage.js?v=25";
+} from "./storage.js?v=26";
 
 const $ = (id) => document.getElementById(id);
 
@@ -1244,20 +1244,25 @@ function setPlayUI(mode) {
    Keyboard conectado, porque se considera táctil de serie, y los controles no
    reaccionaban nunca en el iPad. Lo que sí es fiable es mirar QUÉ generó el
    evento: un trackpad produce pointerType "mouse", y el dedo "touch". */
-const ESPERA_CONTROLES = 5000;
+const ESPERA_CONTROLES = 3000;
 let relojControles = 0;
 
-function despertarControles() {
-  if ($("reader").classList.contains("hidden")) return;
+function programarOcultado() {
   clearTimeout(relojControles);
-  if ($("reader").classList.contains("immersive")) setImmersive(false);
   relojControles = setTimeout(() => {
+    if ($("reader").classList.contains("hidden")) return;
     // Se esconden se esté leyendo o no; solo esperan si hay algo abierto encima.
     if (!$("visor").classList.contains("hidden")) return;
     if (!$("sheet").classList.contains("hidden")) return;
     if (document.querySelector(".popover:not(.hidden)")) return;
     setImmersive(true);
   }, ESPERA_CONTROLES);
+}
+
+function despertarControles() {
+  if ($("reader").classList.contains("hidden")) return;
+  if ($("reader").classList.contains("immersive")) setImmersive(false);
+  programarOcultado();
 }
 
 function setImmersive(on) {
@@ -1773,7 +1778,13 @@ function wireEvents() {
       goToSentence(Number(sn.closest(".seg").dataset.i), Number(sn.dataset.s));
       return;
     }
-    if (!sn) setImmersive(!$("reader").classList.contains("immersive"));
+    if (!sn) {
+      const mostrando = $("reader").classList.contains("immersive");
+      setImmersive(!mostrando);
+      // Si el toque los ha sacado, se esconden solos igual que con el ratón:
+      // en táctil no existe «mover el puntero», y este es el equivalente.
+      if (mostrando) programarOcultado();
+    }
   });
 
   ["wheel", "touchmove"].forEach((ev) =>
