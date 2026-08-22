@@ -2,16 +2,16 @@
    neuronales de Microsoft y resaltado palabra a palabra. */
 "use strict";
 
-import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=26";
-import { resolverImagen, liberarMedios } from "./medios.js?v=26";
-import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=26";
-import { splitSentences } from "./sentences.js?v=26";
+import { extractFromPdf, MOTOR_EXTRACCION } from "./extract.js?v=27";
+import { resolverImagen, liberarMedios } from "./medios.js?v=27";
+import { extractFromEpub, MOTOR_EPUB } from "./epub.js?v=27";
+import { splitSentences } from "./sentences.js?v=27";
 import {
   loadSettings, persistSettings,
   getLibrary, saveLibrary, getDoc, saveDoc, deleteDoc, savePosition as storePosition,
   getCachedTranslation, cacheTranslation, getHighlights, saveHighlights,
   idbGet, idbPut, guardarArchivo, obtenerArchivo,
-} from "./storage.js?v=26";
+} from "./storage.js?v=27";
 
 const $ = (id) => document.getElementById(id);
 
@@ -1212,6 +1212,20 @@ function goToSentence(para, sent, { arrancar = true } = {}) {
   mantenerALaVista({ instant: true, forzar: true });
 }
 
+/* Retroceder como en un reproductor de música: el primer toque vuelve al
+   principio del párrafo que estás oyendo, y solo salta al anterior si ya
+   estabas al principio. Sin esto, querer repetir un párrafo obligaba a ir
+   atrás y luego adelante. */
+const GRACIA_ATRAS = 2;      // segundos dentro del párrafo que aún cuentan como "al principio"
+
+function retroceder() {
+  if (!state.doc) return;
+  const enElArranque = state.sent === 0
+    && (state.engine !== "neural" || !(state.audio.currentTime > GRACIA_ATRAS));
+  if (enElArranque && state.para > 0) goToPara(state.para - 1);
+  else goToSentence(state.para, 0, { arrancar: false });
+}
+
 function goToPara(i) {
   const destino = Math.max(0, Math.min(state.doc.segments.length - 1, i));
   const sonando = state.playing;
@@ -1719,7 +1733,7 @@ function wireEvents() {
 
   $("btnBack").addEventListener("click", exitReader);
   $("btnPlay").addEventListener("click", togglePlay);
-  $("btnPrev").addEventListener("click", () => goToPara(state.para - 1));
+  $("btnPrev").addEventListener("click", retroceder);
   $("btnNext").addEventListener("click", () => goToPara(state.para + 1));
   $("btnExport").addEventListener("click", abrirExportador);
   $("exportStart").addEventListener("click", exportarMP3);
@@ -1941,7 +1955,7 @@ function wireEvents() {
         break;
       case "ArrowLeft":
         e.preventDefault();
-        if (e.shiftKey) saltarOracion(-1); else goToPara(state.para - 1);
+        if (e.shiftKey) saltarOracion(-1); else retroceder();
         break;
       case "+": case "=":
         e.preventDefault(); cambiarVelocidad(0.05); break;
